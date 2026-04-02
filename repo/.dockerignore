@@ -1,0 +1,31 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+campus-portal
+
+# Temp / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Docker volumes (don't copy runtime data into the build context)
+uploads/
+watched_folder/
+
+# Secrets
+.env
+
+# Git
+.git
+.gitignore
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Environment secrets
+.env

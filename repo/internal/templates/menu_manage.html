@@ -1,0 +1,259 @@
+{{define "content"}}
+<div class="page-header">
+    <h2>Menu Management</h2>
+</div>
+
+<div class="grid grid-2">
+    <!-- Add Category -->
+    <div class="card">
+        <div class="card-header"><h3>Add Category</h3></div>
+        <div class="card-body">
+            <form method="POST" action="/menu/manage/category">
+                <div class="form-group">
+                    <label>Name</label>
+                    <input type="text" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label>Parent Category (optional)</label>
+                    <select name="parent_id">
+                        <option value="">None (top-level)</option>
+                        {{range .categories}}
+                        <option value="{{.ID}}">{{.Name}}</option>
+                        {{end}}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Sort Order</label>
+                    <input type="number" name="sort_order" value="0">
+                </div>
+                <button type="submit" class="btn btn-primary">Add Category</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Add Menu Item -->
+    <div class="card">
+        <div class="card-header"><h3>Add Menu Item</h3></div>
+        <div class="card-body">
+            <form method="POST" action="/menu/manage/item">
+                <div class="form-group">
+                    <label>Category</label>
+                    <select name="category_id" required>
+                        {{range .categories}}
+                        <option value="{{.ID}}">{{.Name}}</option>
+                        {{end}}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>SKU</label>
+                    <input type="text" name="sku" required placeholder="e.g., BURGER-001">
+                </div>
+                <div class="form-group">
+                    <label>Name</label>
+                    <input type="text" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label>Description</label>
+                    <textarea name="description" rows="2"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Type</label>
+                    <select name="item_type">
+                        <option value="dish">Dish</option>
+                        <option value="combo">Combo</option>
+                        <option value="addon">Add-on</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Dine-In Price ($)</label>
+                        <input type="number" name="base_price_dine_in" step="0.01" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Takeout Price ($)</label>
+                        <input type="number" name="base_price_takeout" step="0.01" required>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Member Discount (%)</label>
+                    <input type="number" name="member_discount" step="0.1" value="0">
+                </div>
+                <button type="submit" class="btn btn-primary">Add Item</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Existing Items -->
+<div class="card mt-4">
+    <div class="card-header"><h3>Menu Items</h3></div>
+    <div class="card-body">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>SKU</th>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Dine-In</th>
+                    <th>Takeout</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .items}}
+                <tr>
+                    <td>{{.SKU}}</td>
+                    <td>{{.Name}}</td>
+                    <td>{{.ItemType}}</td>
+                    <td>${{printf "%.2f" .BasePriceDineIn}}</td>
+                    <td>${{printf "%.2f" .BasePriceTakeout}}</td>
+                    <td>
+                        {{if .SoldOut}}<span class="badge badge-danger">Sold Out</span>
+                        {{else}}<span class="badge badge-success">Available</span>{{end}}
+                    </td>
+                    <td>
+                        <form method="POST" action="/menu/manage/item/{{.ID}}/sold-out" style="display:inline;">
+                            {{if .SoldOut}}
+                            <input type="hidden" name="sold_out" value="false">
+                            <button type="submit" class="btn btn-sm btn-success">Mark Available</button>
+                            {{else}}
+                            <input type="hidden" name="sold_out" value="true">
+                            <button type="submit" class="btn btn-sm btn-danger">Mark Sold Out</button>
+                            {{end}}
+                        </form>
+                        <button class="btn btn-sm btn-outline" onclick="showItemSettings({{.ID}})">Settings</button>
+                    </td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Holiday Blackouts -->
+<div class="grid grid-2 mt-4">
+    <div class="card">
+        <div class="card-header"><h3>Holiday Blackouts</h3></div>
+        <div class="card-body">
+            <form method="POST" action="/menu/manage/blackout" class="form-inline mb-3">
+                <input type="date" name="date" required>
+                <input type="text" name="description" placeholder="Description" required>
+                <button type="submit" class="btn btn-primary btn-sm">Add</button>
+            </form>
+            {{range .blackouts}}
+            <div class="blackout-item">
+                <span>{{.Date.Format "01/02/2006"}} - {{.Description}}</span>
+                <form method="POST" action="/menu/manage/blackout/{{.ID}}/delete" style="display:inline;">
+                    <button type="submit" class="btn btn-sm btn-danger">Remove</button>
+                </form>
+            </div>
+            {{end}}
+        </div>
+    </div>
+
+    <!-- Add Promotion -->
+    <div class="card">
+        <div class="card-header"><h3>Add Promotion</h3></div>
+        <div class="card-body">
+            <form method="POST" action="/menu/manage/promotion">
+                <div class="form-group">
+                    <label>Menu Item</label>
+                    <select name="menu_item_id" required>
+                        {{range .items}}
+                        <option value="{{.ID}}">{{.Name}} ({{.SKU}})</option>
+                        {{end}}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Discount (%)</label>
+                    <input type="number" name="discount_pct" step="0.1" required>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Starts</label>
+                        <input type="datetime-local" name="starts_at" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Ends</label>
+                        <input type="datetime-local" name="ends_at" required>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary">Add Promotion</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Item Settings Modal -->
+<div id="itemSettingsModal" class="modal" style="display:none;">
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h3>Item Settings</h3>
+            <button onclick="closeModal('itemSettingsModal')" class="btn-close">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="grid grid-2">
+                <!-- Sell Windows -->
+                <div>
+                    <h4>Sell Windows</h4>
+                    <form method="POST" id="sellWindowForm">
+                        <div id="sellWindowRows">
+                            <div class="form-row sell-window-row">
+                                <select name="day_of_week">
+                                    <option value="0">Sunday</option>
+                                    <option value="1">Monday</option>
+                                    <option value="2">Tuesday</option>
+                                    <option value="3">Wednesday</option>
+                                    <option value="4">Thursday</option>
+                                    <option value="5">Friday</option>
+                                    <option value="6">Saturday</option>
+                                </select>
+                                <input type="time" name="open_time" value="06:30">
+                                <input type="time" name="close_time" value="14:00">
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline" onclick="addSellWindowRow()">+ Add Window</button>
+                        <button type="submit" class="btn btn-sm btn-primary">Save Windows</button>
+                    </form>
+                </div>
+
+                <!-- Substitutes & Choices -->
+                <div>
+                    <h4>Substitutes</h4>
+                    <form method="POST" id="substituteForm">
+                        <div class="form-group">
+                            <label>Substitute Item IDs (comma-separated)</label>
+                            <input type="text" name="substitute_ids" placeholder="e.g., 2,5,8">
+                        </div>
+                        <button type="submit" class="btn btn-sm btn-primary">Save Substitutes</button>
+                    </form>
+
+                    <h4 class="mt-3">Add Choice/Option</h4>
+                    <form method="POST" id="choiceForm">
+                        <div class="form-group">
+                            <label>Type</label>
+                            <select name="choice_type">
+                                <option value="prep">Prep</option>
+                                <option value="flavor">Flavor</option>
+                                <option value="size">Size</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Name</label>
+                            <input type="text" name="name" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Extra Price ($)</label>
+                            <input type="number" name="extra_price" step="0.01" value="0">
+                        </div>
+                        <button type="submit" class="btn btn-sm btn-primary">Add Choice</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{template "layout" .}}

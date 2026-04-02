@@ -1,0 +1,46 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.title}} - Campus Wellness Portal</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    {{if .user}}
+    <nav class="navbar">
+        <div class="nav-brand">
+            <a href="/dashboard">Campus Wellness &amp; Training Portal</a>
+        </div>
+        <div class="nav-links">
+            <a href="/dashboard">Dashboard</a>
+            {{if or (eq (printf "%s" .user.Role) "clinician") (eq (printf "%s" .user.Role) "admin")}}
+            <a href="/clinician">Clinician</a>
+            {{end}}
+            <a href="/bookings">Training Sessions</a>
+            <a href="/menu">Dining</a>
+            {{if or (eq (printf "%s" .user.Role) "staff") (eq (printf "%s" .user.Role) "admin")}}
+            <a href="/menu/manage">Menu Mgmt</a>
+            {{end}}
+            {{if eq (printf "%s" .user.Role) "admin"}}
+            <a href="/admin/users">Users</a>
+            <a href="/admin/performance">Performance</a>
+            <a href="/admin/webhooks">Webhooks</a>
+            <a href="/admin/bookings">All Bookings</a>
+            {{end}}
+        </div>
+        <div class="nav-user">
+            <span class="role-badge role-{{printf "%s" .user.Role}}">{{printf "%s" .user.Role}}</span>
+            <span>{{.user.FullName}}</span>
+            <a href="/logout" class="btn btn-sm btn-outline">Logout</a>
+        </div>
+    </nav>
+    {{end}}
+    <main class="container">
+        {{template "content" .}}
+    </main>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
+{{end}}

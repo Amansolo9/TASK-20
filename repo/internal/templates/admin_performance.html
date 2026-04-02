@@ -1,0 +1,110 @@
+{{define "content"}}
+<div class="page-header">
+    <h2>Performance Dashboard</h2>
+    <form method="POST" action="/admin/refresh-views" style="display:inline;">
+        <button type="submit" class="btn btn-outline">Refresh Materialized Views</button>
+    </form>
+</div>
+
+<div class="grid grid-3">
+    <!-- Clinic Utilization -->
+    <div class="card">
+        <div class="card-header"><h3>Clinic Utilization</h3></div>
+        <div class="card-body">
+            {{if .clinicUtil}}
+            <table class="table table-sm">
+                <thead><tr><th>Day</th><th>Department</th><th>Encounters</th></tr></thead>
+                <tbody>
+                {{range .clinicUtil}}
+                <tr>
+                    <td>{{index . "day"}}</td>
+                    <td>{{index . "department"}}</td>
+                    <td>{{index . "encounter_count"}}</td>
+                </tr>
+                {{end}}
+                </tbody>
+            </table>
+            {{else}}
+            <p class="text-muted">No data available yet.</p>
+            {{end}}
+        </div>
+    </div>
+
+    <!-- Booking Fill Rates -->
+    <div class="card">
+        <div class="card-header"><h3>Booking Fill Rates</h3></div>
+        <div class="card-body">
+            {{if .bookingRates}}
+            <table class="table table-sm">
+                <thead><tr><th>Day</th><th>Venue</th><th>Total</th><th>Confirmed</th><th>Canceled</th></tr></thead>
+                <tbody>
+                {{range .bookingRates}}
+                <tr>
+                    <td>{{index . "day"}}</td>
+                    <td>{{index . "venue_id"}}</td>
+                    <td>{{index . "total_bookings"}}</td>
+                    <td>{{index . "confirmed"}}</td>
+                    <td>{{index . "canceled"}}</td>
+                </tr>
+                {{end}}
+                </tbody>
+            </table>
+            {{else}}
+            <p class="text-muted">No data available yet.</p>
+            {{end}}
+        </div>
+    </div>
+
+    <!-- Menu Sell-Through -->
+    <div class="card">
+        <div class="card-header"><h3>Menu Sell-Through</h3></div>
+        <div class="card-body">
+            {{if .menuSell}}
+            <table class="table table-sm">
+                <thead><tr><th>SKU</th><th>Name</th><th>Sold</th><th>Revenue</th></tr></thead>
+                <tbody>
+                {{range .menuSell}}
+                <tr>
+                    <td>{{index . "sku"}}</td>
+                    <td>{{index . "name"}}</td>
+                    <td>{{index . "total_sold"}}</td>
+                    <td>${{index . "total_revenue"}}</td>
+                </tr>
+                {{end}}
+                </tbody>
+            </table>
+            {{else}}
+            <p class="text-muted">No data available yet.</p>
+            {{end}}
+        </div>
+    </div>
+</div>
+
+<!-- Slow Queries -->
+<div class="card mt-4">
+    <div class="card-header"><h3>Slow Queries (>500ms)</h3></div>
+    <div class="card-body">
+        {{if .slowQueries}}
+        <table class="table">
+            <thead>
+                <tr><th>Time</th><th>Duration (ms)</th><th>Query</th><th>Caller</th></tr>
+            </thead>
+            <tbody>
+                {{range .slowQueries}}
+                <tr>
+                    <td>{{.CreatedAt.Format "01/02/2006 03:04 PM"}}</td>
+                    <td><span class="badge badge-danger">{{.Duration}}ms</span></td>
+                    <td><code class="query-text">{{.Query}}</code></td>
+                    <td>{{.Caller}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+        {{else}}
+        <p class="text-muted">No slow queries recorded. Great performance!</p>
+        {{end}}
+    </div>
+</div>
+{{end}}
+
+{{template "layout" .}}

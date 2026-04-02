@@ -1,0 +1,111 @@
+package views
+
+import "fmt"
+
+type UserInfo struct {
+	FullName string
+	Role     string
+}
+
+templ Layout(title string, user *UserInfo, contents templ.Component) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="UTF-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+			<title>{ title } - Campus Wellness Portal</title>
+			<link rel="stylesheet" href="/static/css/style.css"/>
+		</head>
+		<body>
+			if user != nil {
+				<nav class="navbar">
+					<div class="nav-brand">
+						<a href="/dashboard">Campus Wellness &amp; Training Portal</a>
+					</div>
+					<div class="nav-links">
+						<a href="/dashboard">Dashboard</a>
+						if user.Role == "clinician" || user.Role == "admin" {
+							<a href="/clinician">Clinician</a>
+						}
+						<a href="/bookings">Training Sessions</a>
+						<a href="/menu">Dining</a>
+						if user.Role == "staff" || user.Role == "admin" {
+							<a href="/menu/manage">Menu Mgmt</a>
+						}
+						if user.Role == "admin" {
+							<a href="/admin/users">Users</a>
+							<a href="/admin/performance">Performance</a>
+							<a href="/admin/webhooks">Webhooks</a>
+							<a href="/admin/bookings">All Bookings</a>
+						}
+					</div>
+					<div class="nav-user">
+						<span class={ fmt.Sprintf("role-badge role-%s", user.Role) }>{ user.Role }</span>
+						<span>{ user.FullName }</span>
+						<a href="/logout" class="btn btn-sm btn-outline">Logout</a>
+					</div>
+				</nav>
+			}
+			<main class="container">
+				@contents
+			</main>
+			<script src="/static/js/app.js"></script>
+		</body>
+	</html>
+}
+
+templ LoginPage(errorMsg string, csrfToken string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="UTF-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+			<title>Campus Wellness Portal - Login</title>
+			<link rel="stylesheet" href="/static/css/style.css"/>
+		</head>
+		<body class="login-body">
+			<div class="login-container">
+				<div class="login-card">
+					<div class="login-header">
+						<h1>Campus Wellness &amp; Training</h1>
+						<p>Operations Portal</p>
+					</div>
+					if errorMsg != "" {
+						<div class="alert alert-error">{ errorMsg }</div>
+					}
+					<form method="POST" action="/login" class="login-form">
+						<input type="hidden" name="csrf_token" value={ csrfToken }/>
+						<div class="form-group">
+							<label for="username">Username</label>
+							<input type="text" id="username" name="username" required autofocus placeholder="Enter your username"/>
+						</div>
+						<div class="form-group">
+							<label for="password">Password</label>
+							<input type="password" id="password" name="password" required placeholder="Enter your password"/>
+						</div>
+						<button type="submit" class="btn btn-primary btn-full">Sign In</button>
+					</form>
+					<div class="login-footer">
+						<p>Internal network access only. Contact IT for account issues.</p>
+					</div>
+				</div>
+			</div>
+		</body>
+	</html>
+}
+
+templ ErrorPage(user *UserInfo, errorMsg string) {
+	@Layout("Error", user, errorContent(errorMsg))
+}
+
+templ errorContent(errorMsg string) {
+	<div class="card mt-4">
+		<div class="card-body">
+			<div class="alert alert-error">
+				<h3>Error</h3>
+				<p>{ errorMsg }</p>
+			</div>
+			<a href="javascript:history.back()" class="btn btn-outline">Go Back</a>
+		</div>
+	</div>
+}

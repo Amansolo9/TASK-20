@@ -1,0 +1,154 @@
+{{define "content"}}
+<div class="page-header">
+    <h2>Training Sessions</h2>
+</div>
+
+<div class="grid grid-2">
+    <!-- Book New Session -->
+    <div class="card">
+        <div class="card-header">
+            <h3>Book Training Session</h3>
+        </div>
+        <div class="card-body">
+            <form method="POST" action="/bookings" id="bookingForm">
+                <div class="form-group">
+                    <label>Venue</label>
+                    <select name="venue_id" id="venueSelect" required onchange="loadCalendar()">
+                        <option value="">Select venue...</option>
+                        {{range .venues}}
+                        <option value="{{.ID}}">{{.Name}} ({{.RoomType}}{{if gt .Capacity 0}}, cap: {{.Capacity}}{{end}})</option>
+                        {{end}}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Date</label>
+                    <input type="date" id="bookingDate" name="date" required onchange="loadCalendar()">
+                </div>
+
+                <!-- Visual Calendar Grid -->
+                <div class="form-group">
+                    <label>Available 30-Minute Slots</label>
+                    <div id="calendarGrid" class="calendar-grid">
+                        <p class="text-muted">Select a venue and date to see available slots.</p>
+                    </div>
+                    <input type="hidden" name="slot_start" id="slotStartHidden" required>
+                </div>
+
+                <div class="form-group">
+                    <label>Partner (optional)</label>
+                    <input type="number" name="partner_id" id="partnerInput" placeholder="Partner user ID">
+                    <button type="button" class="btn btn-sm btn-outline mt-1" onclick="findPartners()">Find Matching Partners</button>
+                </div>
+                <div id="matchResults" style="display:none;" class="match-results"></div>
+                <div id="conflictWarning" class="alert alert-warning" style="display:none;"></div>
+                <button type="submit" class="btn btn-primary" onclick="return checkBeforeSubmit()">Book Session</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Partner Matching -->
+    <div class="card">
+        <div class="card-header">
+            <h3>Partner Matching Criteria</h3>
+        </div>
+        <div class="card-body">
+            <div class="form-group">
+                <label>Skill Level Range (±)</label>
+                <input type="number" id="skillRange" value="2" min="0" max="10">
+            </div>
+            <div class="form-group">
+                <label>Weight Class Range (± lb)</label>
+                <input type="number" id="weightRange" value="20" min="0" step="5">
+            </div>
+            <div class="form-group">
+                <label>Primary Style</label>
+                <select id="styleFilter">
+                    <option value="">Any</option>
+                    {{range .styles}}
+                    <option value="{{.}}">{{.}}</option>
+                    {{end}}
+                </select>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- My Bookings -->
+<div class="card mt-4">
+    <div class="card-header">
+        <h3>My Bookings</h3>
+    </div>
+    <div class="card-body">
+        {{if .bookings}}
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Date/Time</th>
+                    <th>Venue</th>
+                    <th>Partner</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .bookings}}
+                <tr>
+                    <td>{{.SlotStart.Format "01/02/2006 03:04 PM"}} - {{.SlotEnd.Format "03:04 PM"}}</td>
+                    <td>{{.VenueID}}</td>
+                    <td>
+                        {{if .PartnerID}}
+                            {{index $.userMap (deref .PartnerID)}}
+                        {{else}}
+                            <span class="text-muted">Open</span>
+                        {{end}}
+                    </td>
+                    <td>
+                        <span class="status-badge status-{{printf "%s" .Status}}">{{printf "%s" .Status}}</span>
+                    </td>
+                    <td>
+                        {{if eq (printf "%s" .Status) "initiated"}}
+                        <form method="POST" action="/bookings/{{.ID}}/transition" style="display:inline;">
+                            <input type="hidden" name="status" value="confirmed">
+                            <input type="text" name="note" placeholder="Reason..." class="inline-note" value="Confirmed">
+                            <button type="submit" class="btn btn-sm btn-success">Confirm</button>
+                        </form>
+                        {{end}}
+                        {{if or (eq (printf "%s" .Status) "initiated") (eq (printf "%s" .Status) "confirmed")}}
+                        <form method="POST" action="/bookings/{{.ID}}/transition" style="display:inline;">
+                            <input type="hidden" name="status" value="canceled">
+                            <input type="text" name="note" placeholder="Reason for cancellation..." class="inline-note" required>
+                            <button type="submit" class="btn btn-sm btn-danger">Cancel</button>
+                        </form>
+                        {{end}}
+                        {{if eq (printf "%s" .Status) "canceled"}}
+                        <form method="POST" action="/bookings/{{.ID}}/transition" style="display:inline;">
+                            <input type="hidden" name="status" value="refunded">
+                            <input type="text" name="note" placeholder="Refund reason..." class="inline-note" value="Refund requested">
+                            <button type="submit" class="btn btn-sm btn-outline">Refund</button>
+                        </form>
+                        {{end}}
+                        <button class="btn btn-sm btn-outline" onclick="showBookingAudit({{.ID}})">Audit</button>
+                    </td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+        {{else}}
+        <p class="text-muted">No bookings yet.</p>
+        {{end}}
+    </div>
+</div>
+
+<!-- Audit Modal -->
+<div id="auditModal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Booking Audit Trail</h3>
+            <button onclick="closeModal('auditModal')" class="btn-close">&times;</button>
+        </div>
+        <div id="auditContent" class="modal-body"></div>
+    </div>
+</div>
+{{end}}
+
+{{template "layout" .}}

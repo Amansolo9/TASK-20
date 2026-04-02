@@ -1,0 +1,99 @@
+{{define "content"}}
+<div class="page-header">
+    <h2>Dining Menu</h2>
+</div>
+
+<!-- Category Navigation -->
+<div class="category-nav">
+    <a href="/menu" class="tab {{if not .activeCat}}active{{end}}">All</a>
+    {{range .categories}}
+    <a href="/menu?category_id={{.ID}}" class="tab">{{.Name}}</a>
+    {{end}}
+</div>
+
+<!-- Order Form -->
+<form method="POST" action="/menu/order" id="orderForm">
+    <div class="form-row mb-3">
+        <div class="form-group">
+            <label>Order Type</label>
+            <select name="order_type" id="orderType" onchange="recalculateAll()">
+                <option value="dine_in">Dine-In</option>
+                <option value="takeout">Takeout</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="is_member" id="isMember" value="true" onchange="recalculateAll()">
+                Member Discount
+            </label>
+        </div>
+    </div>
+
+    <div class="menu-grid">
+        {{range .items}}
+        <div class="menu-card {{if not .Available}}unavailable{{end}}">
+            <div class="menu-card-header">
+                <h4>{{.Name}}</h4>
+                <span class="sku">SKU: {{.SKU}}</span>
+                <span class="item-type badge">{{.ItemType}}</span>
+            </div>
+            <div class="menu-card-body">
+                {{if .Description}}<p>{{.Description}}</p>{{end}}
+
+                <div class="price-info">
+                    <span class="price">${{printf "%.2f" .FinalPrice}}</span>
+                    {{if .SoldOut}}
+                    <span class="badge badge-danger">Sold Out</span>
+                    {{else if not .Available}}
+                    <span class="badge badge-warning">Outside sell window</span>
+                    {{end}}
+                </div>
+
+                {{if .Choices}}
+                <div class="choices">
+                    <label>Options:</label>
+                    {{range .Choices}}
+                    <span class="choice-tag">{{.Name}} ({{.ChoiceType}}){{if gt .ExtraPrice 0}} +${{printf "%.2f" .ExtraPrice}}{{end}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+
+                {{if and .SoldOut .Substitutes}}
+                <div class="substitutes">
+                    <label>Suggested alternatives:</label>
+                    {{range .Substitutes}}
+                    <span class="sub-tag">{{.Name}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+
+                {{if .Available}}
+                <div class="order-controls">
+                    <input type="hidden" name="item_id" value="{{.ID}}" disabled id="item-{{.ID}}">
+                    <input type="number" name="quantity" value="1" min="1" max="10" disabled id="qty-{{.ID}}">
+                    <button type="button" class="btn btn-sm btn-primary"
+                            onclick="addToOrder({{.ID}})">Add to Order</button>
+                </div>
+                {{end}}
+            </div>
+        </div>
+        {{end}}
+    </div>
+
+    <!-- Order Summary -->
+    <div class="card mt-4" id="orderSummary" style="display:none;">
+        <div class="card-header">
+            <h3>Order Summary</h3>
+        </div>
+        <div class="card-body">
+            <div id="orderItems"></div>
+            <div class="order-total">
+                <strong>Total: $<span id="orderTotal">0.00</span></strong>
+            </div>
+            <button type="submit" class="btn btn-primary btn-full mt-2">Submit Order</button>
+        </div>
+    </div>
+</form>
+{{end}}
+
+{{template "layout" .}}

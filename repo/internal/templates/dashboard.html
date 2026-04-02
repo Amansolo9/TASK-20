@@ -1,0 +1,185 @@
+{{define "content"}}
+<div class="page-header">
+    <h2>Health Dashboard</h2>
+    {{if .maskedSSN}}<span class="text-muted">SSN: {{.maskedSSN}}</span>{{end}}
+</div>
+
+<div class="grid grid-3">
+    <!-- Health Summary Card -->
+    <div class="card">
+        <div class="card-header">
+            <h3>Health Summary</h3>
+        </div>
+        <div class="card-body">
+            {{if .record}}
+            <div class="info-row">
+                <label>Blood Type:</label>
+                <span>{{.record.BloodType}}</span>
+            </div>
+            <div class="info-row">
+                <label>Allergies:</label>
+                <span>{{if .record.Allergies}}{{.record.Allergies}}{{else}}None recorded{{end}}</span>
+            </div>
+            <div class="info-row">
+                <label>Conditions:</label>
+                <span>{{if .record.Conditions}}{{.record.Conditions}}{{else}}None recorded{{end}}</span>
+            </div>
+            <div class="info-row">
+                <label>Medications:</label>
+                <span>{{if .record.Medications}}{{.record.Medications}}{{else}}None recorded{{end}}</span>
+            </div>
+            {{else}}
+            <p class="text-muted">No health record on file.</p>
+            {{end}}
+
+            {{if or (eq (printf "%s" .user.Role) "clinician") (eq (printf "%s" .user.Role) "admin")}}
+            <hr>
+            <form method="POST" action="/health/update" class="compact-form">
+                <input type="hidden" name="user_id" value="{{.targetUser}}">
+                <div class="form-group">
+                    <label>Allergies</label>
+                    <textarea name="allergies" rows="2">{{if .record}}{{.record.Allergies}}{{end}}</textarea>
+                </div>
+                <div class="form-group">
+                    <label>Conditions</label>
+                    <textarea name="conditions" rows="2">{{if .record}}{{.record.Conditions}}{{end}}</textarea>
+                </div>
+                <div class="form-group">
+                    <label>Medications</label>
+                    <textarea name="medications" rows="2">{{if .record}}{{.record.Medications}}{{end}}</textarea>
+                </div>
+                <div class="form-group">
+                    <label>Blood Type</label>
+                    <input type="text" name="blood_type" value="{{if .record}}{{.record.BloodType}}{{end}}">
+                </div>
+                <div class="form-group">
+                    <label>Reason for change</label>
+                    <input type="text" name="reason" required placeholder="Describe the reason">
+                </div>
+                <button type="submit" class="btn btn-primary">Update Record</button>
+            </form>
+            {{end}}
+        </div>
+    </div>
+
+    <!-- Recent Vitals Card -->
+    <div class="card">
+        <div class="card-header">
+            <h3>Recent Vitals</h3>
+        </div>
+        <div class="card-body">
+            {{if .vitals}}
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Weight (lb)</th>
+                        <th>BP</th>
+                        <th>Temp (F)</th>
+                        <th>HR</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .vitals}}
+                    <tr>
+                        <td>{{.RecordedAt.Format "01/02/2006 03:04 PM"}}</td>
+                        <td>{{printf "%.1f" .WeightLb}}</td>
+                        <td>{{.BPSystolic}}/{{.BPDiastolic}}</td>
+                        <td>{{printf "%.1f" .TemperatureF}}</td>
+                        <td>{{.HeartRate}}</td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+            {{else}}
+            <p class="text-muted">No vitals recorded.</p>
+            {{end}}
+        </div>
+    </div>
+
+    <!-- Documents Card -->
+    <div class="card">
+        <div class="card-header">
+            <h3>Documents</h3>
+        </div>
+        <div class="card-body">
+            <form id="uploadForm" enctype="multipart/form-data" class="upload-form">
+                <input type="hidden" name="user_id" value="{{.targetUser}}">
+                <div class="form-group">
+                    <label>Upload Document (PDF/Image, max 10MB)</label>
+                    <input type="file" id="fileInput" name="file"
+                           accept=".pdf,.jpg,.jpeg,.png,.gif"
+                           onchange="validateFile(this)">
+                    <div id="fileError" class="alert alert-error" style="display:none;"></div>
+                    <div id="fileSuccess" class="alert alert-success" style="display:none;"></div>
+                </div>
+                <button type="submit" class="btn btn-primary" id="uploadBtn" disabled>Upload</button>
+            </form>
+
+            {{if .attachments}}
+            <hr>
+            <ul class="file-list">
+                {{range .attachments}}
+                <li>
+                    <span class="file-icon">&#128196;</span>
+                    <a href="/health/download/{{.ID}}">{{.FileName}}</a>
+                    <span class="text-muted">({{printf "%.1f" (divf .FileSize 1024.0)}} KB)</span>
+                    <span class="text-muted">{{.CreatedAt.Format "01/02/2006 03:04 PM"}}</span>
+                </li>
+                {{end}}
+            </ul>
+            {{end}}
+        </div>
+    </div>
+</div>
+
+<!-- Recent Encounters -->
+<div class="card mt-4">
+    <div class="card-header">
+        <h3>Recent Encounters</h3>
+    </div>
+    <div class="card-body">
+        {{if .encounters}}
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Department</th>
+                    <th>Chief Complaint</th>
+                    <th>Diagnosis</th>
+                    <th>Treatment</th>
+                    <th>History</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .encounters}}
+                <tr>
+                    <td>{{.EncounterDate.Format "01/02/2006 03:04 PM"}}</td>
+                    <td><span class="badge badge-dept">{{printf "%s" .Department}}</span></td>
+                    <td>{{.ChiefComplaint}}</td>
+                    <td>{{.Diagnosis}}</td>
+                    <td>{{.Treatment}}</td>
+                    <td><button class="btn btn-sm btn-outline" onclick="showHistory('encounters', {{.ID}})">View</button></td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+        {{else}}
+        <p class="text-muted">No encounters recorded.</p>
+        {{end}}
+    </div>
+</div>
+
+<!-- History Modal -->
+<div id="historyModal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Revision History</h3>
+            <button onclick="closeModal('historyModal')" class="btn-close">&times;</button>
+        </div>
+        <div id="historyContent" class="modal-body"></div>
+    </div>
+</div>
+{{end}}
+
+{{template "layout" .}}

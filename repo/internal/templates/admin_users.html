@@ -1,0 +1,102 @@
+{{define "content"}}
+<div class="page-header">
+    <h2>User Management</h2>
+    <a href="/admin/register" class="btn btn-primary">Register New User</a>
+</div>
+
+<div class="card">
+    <div class="card-body">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Username</th>
+                    <th>Full Name</th>
+                    <th>Email</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .users}}
+                <tr>
+                    <td>{{.ID}}</td>
+                    <td>{{.Username}}</td>
+                    <td>{{.FullName}}</td>
+                    <td>{{.Email}}</td>
+                    <td><span class="role-badge role-{{printf "%s" .Role}}">{{printf "%s" .Role}}</span></td>
+                    <td>
+                        {{if .Active}}<span class="badge badge-success">Active</span>
+                        {{else}}<span class="badge badge-danger">Inactive</span>{{end}}
+                    </td>
+                    <td>
+                        <!-- Toggle Active -->
+                        <form method="POST" action="/admin/users/{{.ID}}/toggle" style="display:inline;">
+                            {{if .Active}}
+                            <input type="hidden" name="active" value="false">
+                            <button type="submit" class="btn btn-sm btn-danger">Deactivate</button>
+                            {{else}}
+                            <input type="hidden" name="active" value="true">
+                            <button type="submit" class="btn btn-sm btn-success">Activate</button>
+                            {{end}}
+                        </form>
+
+                        <!-- Change Role -->
+                        <form method="POST" action="/admin/users/{{.ID}}/role" style="display:inline;" class="inline-select">
+                            <select name="role" onchange="this.form.submit()">
+                                <option value="student" {{if eq (printf "%s" .Role) "student"}}selected{{end}}>Student</option>
+                                <option value="faculty" {{if eq (printf "%s" .Role) "faculty"}}selected{{end}}>Faculty</option>
+                                <option value="clinician" {{if eq (printf "%s" .Role) "clinician"}}selected{{end}}>Clinician</option>
+                                <option value="staff" {{if eq (printf "%s" .Role) "staff"}}selected{{end}}>Staff</option>
+                                <option value="admin" {{if eq (printf "%s" .Role) "admin"}}selected{{end}}>Admin</option>
+                            </select>
+                        </form>
+
+                        <!-- Temp Access -->
+                        <button class="btn btn-sm btn-outline" onclick="showTempAccess({{.ID}})">Temp Access</button>
+                    </td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Temp Access Modal -->
+<div id="tempAccessModal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Grant Temporary Access</h3>
+            <button onclick="closeModal('tempAccessModal')" class="btn-close">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form method="POST" id="tempAccessForm">
+                <div class="form-group">
+                    <label>Elevated Role</label>
+                    <select name="role">
+                        <option value="clinician">Clinician</option>
+                        <option value="staff">Staff</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Duration (hours)</label>
+                    <input type="number" name="duration_hours" value="8" min="1" max="72">
+                </div>
+                <p class="text-muted">Access will automatically revert after the specified duration.</p>
+                <button type="submit" class="btn btn-primary">Grant Access</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+function showTempAccess(userId) {
+    document.getElementById('tempAccessForm').action = '/admin/users/' + userId + '/temp-access';
+    document.getElementById('tempAccessModal').style.display = 'flex';
+}
+</script>
+{{end}}
+
+{{template "layout" .}}

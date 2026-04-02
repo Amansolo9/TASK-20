@@ -1,0 +1,61 @@
+{{define "content"}}
+<div class="page-header">
+    <h2>Webhook Management</h2>
+</div>
+
+<div class="grid grid-2">
+    <div class="card">
+        <div class="card-header"><h3>Register Webhook Endpoint</h3></div>
+        <div class="card-body">
+            <form method="POST" action="/admin/webhooks">
+                <div class="form-group">
+                    <label>URL</label>
+                    <input type="url" name="url" required placeholder="http://internal-service:8080/webhook">
+                </div>
+                <div class="form-group">
+                    <label>Event Type</label>
+                    <select name="event_type" required>
+                        <option value="booking.created">Booking Created</option>
+                        <option value="booking.confirmed">Booking Confirmed</option>
+                        <option value="booking.canceled">Booking Canceled</option>
+                        <option value="encounter.created">Encounter Created</option>
+                        <option value="user.created">User Created</option>
+                        <option value="order.created">Order Created</option>
+                        <option value="esignature.request">E-Signature Request</option>
+                        <option value="plagiarism.check">Plagiarism Check</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Signing Secret</label>
+                    <input type="password" name="secret" required placeholder="Shared HMAC secret" autocomplete="new-password">
+                </div>
+                <button type="submit" class="btn btn-primary">Register Endpoint</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header"><h3>Registered Endpoints</h3></div>
+        <div class="card-body">
+            {{if .endpoints}}
+            <table class="table table-sm">
+                <thead><tr><th>URL</th><th>Event</th><th>Status</th></tr></thead>
+                <tbody>
+                {{range .endpoints}}
+                <tr>
+                    <td><code>{{.URL}}</code></td>
+                    <td><span class="badge">{{.EventType}}</span></td>
+                    <td>{{if .Active}}<span class="badge badge-success">Active</span>{{else}}<span class="badge badge-danger">Inactive</span>{{end}}</td>
+                </tr>
+                {{end}}
+                </tbody>
+            </table>
+            {{else}}
+            <p class="text-muted">No webhook endpoints registered.</p>
+            {{end}}
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{template "layout" .}}

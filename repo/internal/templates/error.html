@@ -1,0 +1,13 @@
+{{define "content"}}
+<div class="card mt-4">
+    <div class="card-body">
+        <div class="alert alert-error">
+            <h3>Error</h3>
+            <p>{{.error}}</p>
+        </div>
+        <a href="javascript:history.back()" class="btn btn-outline">Go Back</a>
+    </div>
+</div>
+{{end}}
+
+{{template "layout" .}}
