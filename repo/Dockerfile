@@ -4,7 +4,7 @@ FROM golang:1.23-alpine AS builder
 RUN apk add --no-cache git
 
 # Install templ CLI for code generation
-RUN go install github.com/a-h/templ/cmd/templ@latest
+RUN go install github.com/a-h/templ/cmd/templ@v0.2.778
 
 WORKDIR /app
 
