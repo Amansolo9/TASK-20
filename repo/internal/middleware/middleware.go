@@ -1,12 +1,15 @@
 package middleware
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -20,7 +23,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// ===================== SESSION AUTH =====================
+// ===================== SESSION AUTH (browser pages) =====================
 
 func AuthRequired(authSvc *auth.AuthService) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -52,6 +55,79 @@ func AuthRequired(authSvc *auth.AuthService) gin.HandlerFunc {
 		c.Set("userID", user.ID)
 		c.Set("userRole", user.Role)
 		c.Set("orgID", user.OrganizationID)
+		c.Set("authMethod", "session")
+		c.Next()
+	}
+}
+
+// ===================== API TOKEN AUTH (REST API endpoints) =====================
+
+// APITokenRequired validates a Bearer token from the Authorization header.
+// Rejects session-cookie-only access — API routes require a locally-issued token.
+func APITokenRequired(authSvc *auth.AuthService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Bearer token required"})
+			c.Abort()
+			return
+		}
+		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+
+		user, err := authSvc.ValidateAPIToken(tokenStr)
+		if err != nil {
+			log.Printf("TOKEN_INVALID: ip=%s path=%s error=%s", c.ClientIP(), c.Request.URL.Path, err.Error())
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			c.Abort()
+			return
+		}
+
+		c.Set("user", user)
+		c.Set("userID", user.ID)
+		c.Set("userRole", user.Role)
+		c.Set("orgID", user.OrganizationID)
+		c.Set("authMethod", "token")
+		c.Next()
+	}
+}
+
+// SessionOrTokenAuth accepts either session cookie or Bearer token.
+// Used for endpoints that serve both browser and programmatic access.
+func SessionOrTokenAuth(authSvc *auth.AuthService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Try Bearer token first
+		authHeader := c.GetHeader("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+			user, err := authSvc.ValidateAPIToken(tokenStr)
+			if err == nil {
+				c.Set("user", user)
+				c.Set("userID", user.ID)
+				c.Set("userRole", user.Role)
+				c.Set("orgID", user.OrganizationID)
+				c.Set("authMethod", "token")
+				c.Next()
+				return
+			}
+		}
+		// Fall back to session cookie
+		sessionID, err := c.Cookie("session_id")
+		if err != nil || sessionID == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required (Bearer token or session cookie)"})
+			c.Abort()
+			return
+		}
+		user, err := authSvc.ValidateSession(sessionID)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			c.Abort()
+			return
+		}
+		c.Set("user", user)
+		c.Set("userID", user.ID)
+		c.Set("userRole", user.Role)
+		c.Set("orgID", user.OrganizationID)
+		c.Set("authMethod", "session")
 		c.Next()
 	}
 }
@@ -82,8 +158,8 @@ func RequireRole(roles ...models.Role) gin.HandlerFunc {
 	}
 }
 
-// DataScope ensures users can only access their own records (students/faculty)
-// or records within their org/department (clinicians/staff/admin)
+// ===================== DATA SCOPE =====================
+
 func DataScope() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userRole, _ := c.Get("userRole")
@@ -91,21 +167,17 @@ func DataScope() gin.HandlerFunc {
 
 		switch role {
 		case models.RoleStudent, models.RoleFaculty:
-			// Students and faculty can only see their own data
 			c.Set("scopeType", "self")
 		case models.RoleClinician, models.RoleStaff:
-			// Clinicians and staff see department-scoped data
 			c.Set("scopeType", "department")
 		case models.RoleAdmin:
-			// Admin sees everything in their org
 			c.Set("scopeType", "organization")
 		}
 		c.Next()
 	}
 }
 
-// EnforceSelfScope checks if the current user can access a record belonging to recordUserID.
-// For department scope, also checks if the target user shares the same department.
+// EnforceSelfScope checks record access by scope. Denies cross-user for dept scope (use EnforceDeptScope for that).
 func EnforceSelfScope(c *gin.Context, recordUserID uint) bool {
 	scopeType, _ := c.Get("scopeType")
 	userID, _ := c.Get("userID")
@@ -114,21 +186,17 @@ func EnforceSelfScope(c *gin.Context, recordUserID uint) bool {
 	case "self":
 		return recordUserID == userID.(uint)
 	case "department":
-		// Allow access to own records always
 		if recordUserID == userID.(uint) {
 			return true
 		}
-		// Department scope requires a DB lookup to verify department match.
-		// Use EnforceDeptScope() instead for cross-user access. Deny here by default.
-		return false
+		return false // Must use EnforceDeptScope for cross-user
 	case "organization":
 		return true
 	}
 	return false
 }
 
-// EnforceDeptScope is a stricter check: verifies the target user's department matches.
-// Requires the DB to look up the target user's department. Use for clinician routes.
+// EnforceDeptScope verifies dept match via DB. Fail-closed: nil dept denies cross-user access.
 func EnforceDeptScope(c *gin.Context, db *gorm.DB, recordUserID uint) bool {
 	scopeType, _ := c.Get("scopeType")
 	userID, _ := c.Get("userID")
@@ -141,38 +209,56 @@ func EnforceDeptScope(c *gin.Context, db *gorm.DB, recordUserID uint) bool {
 	case "self":
 		return false
 	case "organization":
-		return true
+		// Org-scoped: also verify same org
+		orgID, _ := c.Get("orgID")
+		var targetUser models.User
+		if err := db.First(&targetUser, recordUserID).Error; err != nil {
+			return false
+		}
+		return targetUser.OrganizationID == orgID.(uint)
 	case "department":
 		user, exists := c.Get("user")
 		if !exists {
 			return false
 		}
 		currentUser := user.(*models.User)
+		// FAIL CLOSED: if requester has no department, deny cross-user access
 		if currentUser.DepartmentID == nil {
-			return true
+			return false
 		}
 		var targetUser models.User
 		if err := db.First(&targetUser, recordUserID).Error; err != nil {
 			return false
 		}
+		// Also enforce same org
+		if targetUser.OrganizationID != currentUser.OrganizationID {
+			return false
+		}
+		// FAIL CLOSED: if target has no department, deny
 		if targetUser.DepartmentID == nil {
-			return true
+			return false
 		}
 		return *currentUser.DepartmentID == *targetUser.DepartmentID
 	}
 	return false
 }
 
+// EnforceOrgScope checks that a record's org matches the requester's org.
+func EnforceOrgScope(c *gin.Context, recordOrgID uint) bool {
+	orgID, exists := c.Get("orgID")
+	if !exists {
+		return false
+	}
+	return recordOrgID == orgID.(uint)
+}
+
 // ===================== HMAC SIGNING =====================
 
+// HMACAuth verifies HMAC signatures on API requests.
+// It reads the actual request body, computes SHA-256, and verifies the signature.
+// The body is restored for downstream handlers.
 func HMACAuth(secret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Only enforce on /api/internal/* routes
-		if !strings.HasPrefix(c.Request.URL.Path, "/api/internal/") {
-			c.Next()
-			return
-		}
-
 		signature := c.GetHeader("X-HMAC-Signature")
 		timestamp := c.GetHeader("X-HMAC-Timestamp")
 		if signature == "" || timestamp == "" {
@@ -181,17 +267,45 @@ func HMACAuth(secret string) gin.HandlerFunc {
 			return
 		}
 
-		// Verify timestamp is within 5 minutes
+		// ABSOLUTE skew validation: reject both old AND future timestamps beyond 5 min
 		ts, err := time.Parse(time.RFC3339, timestamp)
-		if err != nil || time.Since(ts) > 5*time.Minute {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired timestamp"})
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid timestamp format"})
+			c.Abort()
+			return
+		}
+		skew := math.Abs(time.Since(ts).Seconds())
+		if skew > 300 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "timestamp outside allowed skew (±5 min)"})
 			c.Abort()
 			return
 		}
 
-		// Compute expected HMAC including body hash for tamper detection
-		bodyHash := c.GetHeader("X-Body-SHA256")
-		message := fmt.Sprintf("%s:%s:%s:%s", c.Request.Method, c.Request.URL.Path, timestamp, bodyHash)
+		// Read actual body bytes and compute SHA-256
+		var bodyBytes []byte
+		if c.Request.Body != nil {
+			bodyBytes, err = io.ReadAll(c.Request.Body)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot read request body"})
+				c.Abort()
+				return
+			}
+			// Restore body for downstream handlers
+			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+		computedHash := sha256.Sum256(bodyBytes)
+		computedHashHex := hex.EncodeToString(computedHash[:])
+
+		// If client provided X-Body-SHA256, it must match the computed hash
+		claimedHash := c.GetHeader("X-Body-SHA256")
+		if claimedHash != "" && claimedHash != computedHashHex {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "body hash mismatch"})
+			c.Abort()
+			return
+		}
+
+		// Compute HMAC over method:path:timestamp:bodyHash
+		message := fmt.Sprintf("%s:%s:%s:%s", c.Request.Method, c.Request.URL.Path, timestamp, computedHashHex)
 		mac := hmac.New(sha256.New, []byte(secret))
 		mac.Write([]byte(message))
 		expected := hex.EncodeToString(mac.Sum(nil))
@@ -209,15 +323,15 @@ func HMACAuth(secret string) gin.HandlerFunc {
 // ===================== RATE LIMITER =====================
 
 type rateLimiter struct {
-	mu       sync.Mutex
-	clients  map[string]*clientWindow
-	limit    int
-	window   time.Duration
+	mu      sync.Mutex
+	clients map[string]*clientWindow
+	limit   int
+	window  time.Duration
 }
 
 type clientWindow struct {
-	count    int
-	resetAt  time.Time
+	count   int
+	resetAt time.Time
 }
 
 func NewRateLimiter(limit int, window time.Duration) *rateLimiter {
@@ -226,7 +340,6 @@ func NewRateLimiter(limit int, window time.Duration) *rateLimiter {
 		limit:   limit,
 		window:  window,
 	}
-	// Cleanup goroutine
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
@@ -262,17 +375,13 @@ func RateLimit(limit int) gin.HandlerFunc {
 		if cw.count >= rl.limit {
 			rl.mu.Unlock()
 			retryAfter := int(time.Until(cw.resetAt).Seconds())
-			// For browser page requests, return HTML; for API requests, return JSON
 			accept := c.GetHeader("Accept")
 			if strings.Contains(accept, "text/html") {
 				c.Header("Retry-After", fmt.Sprintf("%d", retryAfter))
 				c.Data(http.StatusTooManyRequests, "text/html; charset=utf-8",
-					[]byte(fmt.Sprintf(`<!DOCTYPE html><html><head><title>Too Many Requests</title><link rel="stylesheet" href="/static/css/style.css"></head><body class="login-body"><div class="login-container"><div class="login-card"><div class="login-header"><h1>Too Many Requests</h1></div><div style="padding:2rem"><div class="alert alert-error">Rate limit exceeded. Please wait %d seconds and try again.</div><a href="javascript:history.back()" class="btn btn-primary btn-full">Go Back</a></div></div></div></body></html>`, retryAfter)))
+					[]byte(fmt.Sprintf(`<!DOCTYPE html><html><head><title>Too Many Requests</title><link rel="stylesheet" href="/static/css/style.css"></head><body class="login-body"><div class="login-container"><div class="login-card"><div class="login-header"><h1>Too Many Requests</h1></div><div style="padding:2rem"><div class="alert alert-error">Rate limit exceeded. Please wait %d seconds.</div><a href="javascript:history.back()" class="btn btn-primary btn-full">Go Back</a></div></div></div></body></html>`, retryAfter)))
 			} else {
-				c.JSON(http.StatusTooManyRequests, gin.H{
-					"error":       "rate limit exceeded",
-					"retry_after": retryAfter,
-				})
+				c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded", "retry_after": retryAfter})
 			}
 			c.Abort()
 			return
@@ -286,13 +395,8 @@ func RateLimit(limit int) gin.HandlerFunc {
 
 // ===================== CSRF PROTECTION =====================
 
-// CSRFProtect uses a double-submit cookie pattern:
-// - On every request, ensure a csrf_token cookie exists (readable by JS).
-// - On POST/PUT/DELETE, require a matching token in the form field OR X-CSRF-Token header.
-// - JavaScript auto-injects the hidden field into every form on page load.
 func CSRFProtect() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Ensure the CSRF cookie exists on every request
 		token := ensureCSRFCookie(c)
 		c.Set("csrf_token", token)
 
@@ -301,8 +405,12 @@ func CSRFProtect() gin.HandlerFunc {
 			return
 		}
 
-		// For JSON API calls, validate Origin header with exact host match
-		// to prevent cross-origin JSON POST attacks
+		// Skip CSRF for token-authenticated API requests (tokens are not cookie-based)
+		if method, exists := c.Get("authMethod"); exists && method == "token" {
+			c.Next()
+			return
+		}
+
 		contentType := c.GetHeader("Content-Type")
 		if strings.Contains(contentType, "application/json") {
 			if !isValidOrigin(c) {
@@ -321,7 +429,6 @@ func CSRFProtect() gin.HandlerFunc {
 			return
 		}
 
-		// Check form field first, then header (for AJAX multipart uploads)
 		submittedToken := c.PostForm("csrf_token")
 		if submittedToken == "" {
 			submittedToken = c.GetHeader("X-CSRF-Token")
@@ -344,7 +451,6 @@ func ensureCSRFCookie(c *gin.Context) string {
 	b := make([]byte, 32)
 	rand.Read(b)
 	token := hex.EncodeToString(b)
-	// httpOnly=false so JavaScript can read it and inject into forms
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("csrf_token", token, 86400, "/", "", false, false)
 	return token
@@ -355,10 +461,8 @@ func getCSRFFromCookie(c *gin.Context) string {
 	return token
 }
 
-// isValidOrigin checks that Origin/Referer headers match the request host exactly,
-// preventing substring-based bypass (e.g., "localhost:8080.evil.com").
 func isValidOrigin(c *gin.Context) bool {
-	host := c.Request.Host // e.g., "localhost:8080"
+	host := c.Request.Host
 	origin := c.GetHeader("Origin")
 	referer := c.GetHeader("Referer")
 
@@ -376,12 +480,9 @@ func isValidOrigin(c *gin.Context) bool {
 		}
 		return parsed.Host == host
 	}
-	// No Origin or Referer — for JSON requests, require X-Requested-With header
-	// as an additional CSRF defense (cannot be set cross-origin without CORS preflight)
 	if c.GetHeader("X-Requested-With") == "XMLHttpRequest" {
 		return true
 	}
-	// Allow GET (read-only) but block state-changing methods without any origin indicator
 	if c.Request.Method == "GET" || c.Request.Method == "HEAD" {
 		return true
 	}
@@ -390,29 +491,39 @@ func isValidOrigin(c *gin.Context) bool {
 
 // ===================== SLOW QUERY LOGGER =====================
 
-// SlowQueryLogger records any HTTP request that takes longer than thresholdMs.
-// It also installs a GORM callback to track individual slow SQL queries.
+// SlowQueryLogger instruments both HTTP request duration and GORM query duration.
+// The GORM callback uses the statement's context to track timing.
 func SlowQueryLogger(db *gorm.DB, thresholdMs int64) gin.HandlerFunc {
-	// Install GORM callback to track slow queries at the DB level
-	db.Callback().Query().After("gorm:query").Register("slow_query_log", func(d *gorm.DB) {
-		elapsed := d.Statement.Context.Value("gorm:started_at")
-		if start, ok := elapsed.(time.Time); ok {
-			duration := time.Since(start)
-			if duration.Milliseconds() > thresholdMs {
-				sql := d.Statement.SQL.String()
-				log.Printf("SLOW QUERY [%dms]: %s", duration.Milliseconds(), sql)
-				db.Exec("INSERT INTO slow_query_logs (query, duration, caller, created_at) VALUES (?, ?, ?, ?)",
-					sql, duration.Milliseconds(), d.Statement.Table, time.Now())
-			}
+	// Register a GORM "before" callback to record start time
+	_ = db.Callback().Query().Before("gorm:query").Register("slow_query_start", func(d *gorm.DB) {
+		d.Set("slow_query_start", time.Now())
+	})
+
+	// Register a GORM "after" callback to measure elapsed
+	_ = db.Callback().Query().After("gorm:query").Register("slow_query_log", func(d *gorm.DB) {
+		val, ok := d.Get("slow_query_start")
+		if !ok {
+			return
+		}
+		start, ok := val.(time.Time)
+		if !ok {
+			return
+		}
+		elapsed := time.Since(start).Milliseconds()
+		if elapsed > thresholdMs {
+			sql := d.Statement.SQL.String()
+			log.Printf("SLOW QUERY [%dms]: %s", elapsed, sql)
+			db.Exec("INSERT INTO slow_query_logs (query, duration, caller, created_at) VALUES (?, ?, ?, ?)",
+				sql, elapsed, d.Statement.Table, time.Now())
 		}
 	})
 
 	return func(c *gin.Context) {
 		start := time.Now()
 		c.Next()
-		duration := time.Since(start)
-		if duration.Milliseconds() > thresholdMs {
-			log.Printf("SLOW REQUEST [%dms]: %s %s", duration.Milliseconds(), c.Request.Method, c.Request.URL.Path)
+		elapsed := time.Since(start).Milliseconds()
+		if elapsed > thresholdMs {
+			log.Printf("SLOW REQUEST [%dms]: %s %s", elapsed, c.Request.Method, c.Request.URL.Path)
 		}
 	}
 }

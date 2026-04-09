@@ -51,7 +51,6 @@ func main() {
 	csvWatcher.Start()
 	defer csvWatcher.Stop()
 
-	// Temp access revert ticker
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
@@ -60,13 +59,12 @@ func main() {
 		}
 	}()
 
-	// Materialized view refresh + slow query cleanup ticker
 	go func() {
 		ticker := time.NewTicker(cfg.MVRefreshInterval)
 		defer ticker.Stop()
 		for range ticker.C {
 			reportingSvc.RefreshMaterializedViews()
-			reportingSvc.CleanupSlowQueryLogs(30) // Keep 30 days
+			reportingSvc.CleanupSlowQueryLogs(30)
 		}
 	}()
 
@@ -89,7 +87,7 @@ func main() {
 	r.GET("/login", authHandler.LoginPage)
 	r.POST("/login", authHandler.Login)
 
-	// Authenticated routes
+	// ===================== Browser (session-authenticated) routes =====================
 	authed := r.Group("/")
 	authed.Use(middleware.AuthRequired(authSvc))
 	authed.Use(middleware.DataScope())
@@ -98,12 +96,24 @@ func main() {
 		authed.GET("/", func(c *gin.Context) { c.Redirect(302, "/dashboard") })
 		authed.GET("/logout", authHandler.Logout)
 
-		// Dashboard - all roles
+		// Token issuance (session-auth users can get an API token)
+		authed.POST("/api/tokens", authHandler.IssueToken)
+
+		// Dashboard + document access (all roles)
 		authed.GET("/dashboard", healthHandler.DashboardPage)
-		authed.POST("/health/update", healthHandler.UpdateHealthRecord)
-		authed.POST("/health/upload", healthHandler.UploadAttachment)
 		authed.GET("/health/download/:id", healthHandler.DownloadAttachment)
 		authed.GET("/health/history", healthHandler.RecordHistory)
+
+		// Self-upload: students/faculty can upload documents to their OWN record only.
+		// The handler enforces self-only for student/faculty, scoped for clinician/admin.
+		authed.POST("/health/upload", healthHandler.UploadAttachment)
+
+		// Health record mutations — clinician/admin only (staff cannot modify PHI)
+		healthMut := authed.Group("/health")
+		healthMut.Use(middleware.RequireRole(models.RoleClinician, models.RoleAdmin))
+		{
+			healthMut.POST("/update", healthHandler.UpdateHealthRecord)
+		}
 
 		// Clinician routes
 		clinician := authed.Group("/clinician")
@@ -114,21 +124,17 @@ func main() {
 			clinician.POST("/vitals", healthHandler.RecordVitals)
 		}
 
-		// Booking routes - students, faculty, staff, admin
+		// Booking page routes (browser)
 		authed.GET("/bookings", bookingHandler.BookingPage)
 		authed.POST("/bookings", bookingHandler.CreateBooking)
 		authed.POST("/bookings/:id/transition", bookingHandler.TransitionBooking)
 		authed.GET("/bookings/:id/audit", bookingHandler.BookingAudit)
-		authed.GET("/api/slots", bookingHandler.GetSlots)
-		authed.GET("/api/match-partners", bookingHandler.MatchPartners)
-		authed.GET("/api/check-conflicts", bookingHandler.CheckConflicts)
 
-		// Menu routes - all roles can view
+		// Menu page routes (browser)
 		authed.GET("/menu", menuHandler.MenuPage)
 		authed.POST("/menu/order", menuHandler.CreateOrder)
-		authed.GET("/api/price", menuHandler.CalculatePrice)
 
-		// Menu management - staff and admin only
+		// Menu management — staff/admin only
 		menuManage := authed.Group("/menu/manage")
 		menuManage.Use(middleware.RequireRole(models.RoleStaff, models.RoleAdmin))
 		{
@@ -154,31 +160,46 @@ func main() {
 			admin.POST("/users/:id/toggle", authHandler.ToggleUser)
 			admin.POST("/users/:id/role", authHandler.ChangeRole)
 			admin.POST("/users/:id/temp-access", authHandler.GrantTempAccess)
+			admin.POST("/users/:id/reset-password", authHandler.ResetPassword)
 			admin.GET("/performance", adminHandler.PerformancePage)
 			admin.POST("/refresh-views", adminHandler.RefreshViews)
 			admin.GET("/webhooks", adminHandler.WebhooksPage)
 			admin.POST("/webhooks", adminHandler.RegisterWebhook)
 			admin.GET("/bookings", bookingHandler.AllBookingsPage)
+			admin.POST("/reports", adminHandler.SubmitReport)
+			admin.GET("/reports/:id", adminHandler.GetReportStatus)
 		}
-
 	}
 
-	// Internal API routes (HMAC-signed) — outside authed group
+	// ===================== REST API (token + HMAC) routes =====================
+	// Per prompt: "all API access uses locally issued tokens, HMAC request signing, and rate limiting"
+	api := r.Group("/api")
+	api.Use(middleware.APITokenRequired(authSvc))
+	api.Use(middleware.HMACAuth(cfg.HMACSecret))
+	api.Use(middleware.DataScope())
+	{
+		api.GET("/slots", bookingHandler.GetSlots)
+		api.GET("/match-partners", bookingHandler.MatchPartners)
+		api.GET("/check-conflicts", bookingHandler.CheckConflicts)
+		api.GET("/price", menuHandler.CalculatePrice)
+	}
+
+	// ===================== Internal routes (token + HMAC + admin RBAC) =====================
 	internal := r.Group("/api/internal")
+	internal.Use(middleware.APITokenRequired(authSvc))
 	internal.Use(middleware.HMACAuth(cfg.HMACSecret))
+	internal.Use(middleware.DataScope())
+	internal.Use(middleware.RequireRole(models.RoleAdmin))
 	{
 		internal.GET("/clinic-utilization", adminHandler.APIClinicUtilization)
 		internal.GET("/booking-fill-rates", adminHandler.APIBookingFillRates)
 		internal.GET("/menu-sell-through", adminHandler.APIMenuSellThrough)
-
-		// Webhook receiver — now HMAC-protected
 		internal.POST("/webhooks/receive", func(c *gin.Context) {
 			var payload map[string]interface{}
 			if err := c.BindJSON(&payload); err != nil {
 				c.JSON(400, gin.H{"error": "invalid payload"})
 				return
 			}
-			// Log event type only — avoid logging potentially sensitive payload data
 			eventType, _ := payload["event_type"].(string)
 			log.Printf("Webhook received: event_type=%s", eventType)
 			c.JSON(200, gin.H{"status": "received"})

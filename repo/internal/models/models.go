@@ -181,15 +181,16 @@ type TrainerProfile struct {
 }
 
 type Booking struct {
-	ID            uint          `gorm:"primaryKey" json:"id"`
-	RequesterID   uint          `gorm:"not null;index" json:"requester_id"`
-	PartnerID     *uint         `gorm:"index" json:"partner_id"`
-	VenueID       uint          `gorm:"not null" json:"venue_id"`
-	SlotStart     time.Time     `gorm:"not null;index" json:"slot_start"`
-	SlotEnd       time.Time     `gorm:"not null" json:"slot_end"`
-	Status        BookingStatus `gorm:"type:varchar(20);not null;default:'initiated'" json:"status"`
-	CreatedAt     time.Time     `json:"created_at"`
-	UpdatedAt     time.Time     `json:"updated_at"`
+	ID             uint          `gorm:"primaryKey" json:"id"`
+	OrganizationID uint          `gorm:"not null;index" json:"organization_id"`
+	RequesterID    uint          `gorm:"not null;index" json:"requester_id"`
+	PartnerID      *uint         `gorm:"index" json:"partner_id"`
+	VenueID        uint          `gorm:"not null" json:"venue_id"`
+	SlotStart      time.Time     `gorm:"not null;index" json:"slot_start"`
+	SlotEnd        time.Time     `gorm:"not null" json:"slot_end"`
+	Status         BookingStatus `gorm:"type:varchar(20);not null;default:'initiated'" json:"status"`
+	CreatedAt      time.Time     `json:"created_at"`
+	UpdatedAt      time.Time     `json:"updated_at"`
 }
 
 type BookingAudit struct {
@@ -205,16 +206,18 @@ type BookingAudit struct {
 // ===================== MENU / DINING =====================
 
 type MenuCategory struct {
-	ID       uint   `gorm:"primaryKey" json:"id"`
-	Name     string `gorm:"not null" json:"name"`
-	ParentID *uint  `gorm:"index" json:"parent_id"`
-	SortOrder int   `json:"sort_order"`
+	ID             uint   `gorm:"primaryKey" json:"id"`
+	OrganizationID uint   `gorm:"not null;index" json:"organization_id"`
+	Name           string `gorm:"not null" json:"name"`
+	ParentID       *uint  `gorm:"index" json:"parent_id"`
+	SortOrder      int    `json:"sort_order"`
 }
 
 type MenuItem struct {
-	ID          uint    `gorm:"primaryKey" json:"id"`
-	CategoryID  uint    `gorm:"not null;index" json:"category_id"`
-	SKU         string  `gorm:"uniqueIndex;size:50;not null" json:"sku"`
+	ID             uint    `gorm:"primaryKey" json:"id"`
+	OrganizationID uint    `gorm:"not null;index" json:"organization_id"`
+	CategoryID     uint    `gorm:"not null;index" json:"category_id"`
+	SKU            string  `gorm:"uniqueIndex;size:50;not null" json:"sku"`
 	Name        string  `gorm:"not null" json:"name"`
 	Description string  `gorm:"type:text" json:"description"`
 	ItemType    string  `gorm:"size:20;not null;default:'dish'" json:"item_type"` // dish, combo, addon
@@ -250,9 +253,10 @@ type SellWindow struct {
 }
 
 type HolidayBlackout struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	Date        time.Time `gorm:"not null;uniqueIndex" json:"date"`
-	Description string    `gorm:"type:text" json:"description"`
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	OrganizationID uint      `gorm:"not null;index" json:"organization_id"`
+	Date           time.Time `gorm:"not null" json:"date"`
+	Description    string    `gorm:"type:text" json:"description"`
 }
 
 type Promotion struct {
@@ -265,8 +269,9 @@ type Promotion struct {
 }
 
 type MenuOrder struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	UserID      uint      `gorm:"not null;index" json:"user_id"`
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	OrganizationID uint      `gorm:"not null;index" json:"organization_id"`
+	UserID         uint      `gorm:"not null;index" json:"user_id"`
 	OrderType   string    `gorm:"size:20;not null" json:"order_type"` // dine_in, takeout
 	TotalPrice  float64   `gorm:"not null" json:"total_price"`
 	IsMember    bool      `gorm:"default:false" json:"is_member"`
@@ -284,15 +289,29 @@ type MenuOrderItem struct {
 	Choices     string  `gorm:"type:text" json:"choices"` // JSON of selected choices
 }
 
+// ===================== API TOKENS =====================
+
+type APIToken struct {
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	Token          string    `gorm:"uniqueIndex;size:64;not null" json:"-"`
+	UserID         uint      `gorm:"not null;index" json:"user_id"`
+	OrganizationID uint      `gorm:"not null" json:"organization_id"`
+	Description    string    `gorm:"size:255" json:"description"`
+	ExpiresAt      time.Time `gorm:"not null" json:"expires_at"`
+	Active         bool      `gorm:"default:true" json:"active"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 // ===================== INTEGRATION =====================
 
 type WebhookEndpoint struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	URL       string    `gorm:"not null" json:"url"`
-	EventType string    `gorm:"size:50;not null;index" json:"event_type"`
-	Secret    string    `gorm:"not null" json:"-"`
-	Active    bool      `gorm:"default:true" json:"active"`
-	CreatedAt time.Time `json:"created_at"`
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	OrganizationID uint      `gorm:"not null;index" json:"organization_id"`
+	URL            string    `gorm:"not null" json:"url"`
+	EventType      string    `gorm:"size:50;not null;index" json:"event_type"`
+	Secret         string    `gorm:"not null" json:"-"`
+	Active         bool      `gorm:"default:true" json:"active"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type WebhookDelivery struct {
@@ -303,6 +322,19 @@ type WebhookDelivery struct {
 	Response   string    `gorm:"type:text" json:"response"`
 	Attempts   int       `gorm:"default:1" json:"attempts"`
 	CreatedAt  time.Time `json:"created_at"`
+}
+
+// ===================== ASYNC REPORTS =====================
+
+type ReportJob struct {
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	OrganizationID uint      `gorm:"not null;index" json:"organization_id"`
+	ReportType     string    `gorm:"size:50;not null" json:"report_type"`
+	Status         string    `gorm:"size:20;not null;default:'pending'" json:"status"` // pending, running, completed, failed
+	Result         string    `gorm:"type:text" json:"result"`
+	RequestedBy    uint      `gorm:"not null" json:"requested_by"`
+	CreatedAt      time.Time `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at"`
 }
 
 type SlowQueryLog struct {

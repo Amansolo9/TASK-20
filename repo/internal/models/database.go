@@ -73,8 +73,10 @@ func AutoMigrate(db *gorm.DB) {
 		&Promotion{},
 		&MenuOrder{},
 		&MenuOrderItem{},
+		&APIToken{},
 		&WebhookEndpoint{},
 		&WebhookDelivery{},
+		&ReportJob{},
 		&SlowQueryLog{},
 	)
 	if err != nil {
@@ -125,8 +127,8 @@ func AutoMigrate(db *gorm.DB) {
 				DROP TABLE vitals_backup;
 			END IF;
 
-			-- Create monthly partitions for 2025-2027
-			FOR yr IN 2025..2027 LOOP
+			-- Rolling partition: create partitions from 2025 through 2 years in the future
+			FOR yr IN 2025..(EXTRACT(YEAR FROM NOW())::INT + 2) LOOP
 				FOR m IN 1..12 LOOP
 					month_start := make_date(yr, m, 1);
 					month_end := month_start + '1 month'::INTERVAL;
@@ -151,48 +153,58 @@ func AutoMigrate(db *gorm.DB) {
 		END $$;
 	`)
 
-	// Create materialized views for reporting
+	// Create org-scoped materialized views for reporting.
+	// Drop and recreate to ensure organization_id column is present (migration from
+	// earlier schema that lacked the org dimension).
+	db.Exec(`DROP MATERIALIZED VIEW IF EXISTS mv_clinic_utilization`)
+	db.Exec(`DROP MATERIALIZED VIEW IF EXISTS mv_booking_fill_rates`)
+	db.Exec(`DROP MATERIALIZED VIEW IF EXISTS mv_menu_sell_through`)
+
 	db.Exec(`
-		CREATE MATERIALIZED VIEW IF NOT EXISTS mv_clinic_utilization AS
+		CREATE MATERIALIZED VIEW mv_clinic_utilization AS
 		SELECT
 			date_trunc('day', e.encounter_date) AS day,
 			e.department,
+			u.organization_id,
 			COUNT(*) AS encounter_count
 		FROM encounters e
-		GROUP BY day, e.department
+		JOIN users u ON u.id = e.clinician_id
+		GROUP BY day, e.department, u.organization_id
 		ORDER BY day DESC;
 	`)
 
 	db.Exec(`
-		CREATE MATERIALIZED VIEW IF NOT EXISTS mv_booking_fill_rates AS
+		CREATE MATERIALIZED VIEW mv_booking_fill_rates AS
 		SELECT
 			date_trunc('day', b.slot_start) AS day,
 			b.venue_id,
+			b.organization_id,
 			COUNT(*) AS total_bookings,
 			COUNT(*) FILTER (WHERE b.status = 'confirmed') AS confirmed,
 			COUNT(*) FILTER (WHERE b.status = 'canceled') AS canceled
 		FROM bookings b
-		GROUP BY day, b.venue_id
+		GROUP BY day, b.venue_id, b.organization_id
 		ORDER BY day DESC;
 	`)
 
 	db.Exec(`
-		CREATE MATERIALIZED VIEW IF NOT EXISTS mv_menu_sell_through AS
+		CREATE MATERIALIZED VIEW mv_menu_sell_through AS
 		SELECT
 			mi.sku,
 			mi.name,
+			mi.organization_id,
 			COALESCE(SUM(moi.quantity), 0) AS total_sold,
 			COALESCE(SUM(moi.quantity * moi.unit_price), 0) AS total_revenue
 		FROM menu_items mi
 		LEFT JOIN menu_order_items moi ON moi.menu_item_id = mi.id
-		GROUP BY mi.id, mi.sku, mi.name
+		GROUP BY mi.id, mi.sku, mi.name, mi.organization_id
 		ORDER BY total_sold DESC;
 	`)
 
 	// Create unique indexes on materialized views (required for REFRESH CONCURRENTLY)
-	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS mv_clinic_util_idx ON mv_clinic_utilization (day, department)`)
-	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS mv_booking_fill_idx ON mv_booking_fill_rates (day, venue_id)`)
-	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS mv_menu_sell_idx ON mv_menu_sell_through (sku)`)
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS mv_clinic_util_idx ON mv_clinic_utilization (day, department, organization_id)`)
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS mv_booking_fill_idx ON mv_booking_fill_rates (day, venue_id, organization_id)`)
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS mv_menu_sell_idx ON mv_menu_sell_through (sku, organization_id)`)
 
 	// Create audit log trigger function
 	db.Exec(`
@@ -261,17 +273,17 @@ func SeedDefaults(db *gorm.DB) {
 		db.Create(&TrainerProfile{UserID: 3, SkillLevel: 5, WeightClass: 180, PrimaryStyle: "jiu-jitsu"})
 		db.Create(&TrainerProfile{UserID: 7, SkillLevel: 7, WeightClass: 170, PrimaryStyle: "muay-thai"})
 
-		// Seed sample menu categories and items
-		db.Create(&MenuCategory{Name: "Entrees", SortOrder: 1})
-		db.Create(&MenuCategory{Name: "Sides", SortOrder: 2})
-		db.Create(&MenuCategory{Name: "Beverages", SortOrder: 3})
-		db.Create(&MenuCategory{Name: "Combos", SortOrder: 4})
+		// Seed sample menu categories and items (org-scoped)
+		db.Create(&MenuCategory{OrganizationID: 1, Name: "Entrees", SortOrder: 1})
+		db.Create(&MenuCategory{OrganizationID: 1, Name: "Sides", SortOrder: 2})
+		db.Create(&MenuCategory{OrganizationID: 1, Name: "Beverages", SortOrder: 3})
+		db.Create(&MenuCategory{OrganizationID: 1, Name: "Combos", SortOrder: 4})
 
-		db.Create(&MenuItem{CategoryID: 1, SKU: "ENT-001", Name: "Grilled Chicken Wrap", Description: "Seasoned chicken with fresh veggies", ItemType: "dish", BasePriceDineIn: 8.99, BasePriceTakeout: 9.49, MemberDiscount: 10})
-		db.Create(&MenuItem{CategoryID: 1, SKU: "ENT-002", Name: "Veggie Burger", Description: "Plant-based patty with house sauce", ItemType: "dish", BasePriceDineIn: 7.99, BasePriceTakeout: 8.49, MemberDiscount: 10})
-		db.Create(&MenuItem{CategoryID: 2, SKU: "SID-001", Name: "Sweet Potato Fries", Description: "Crispy baked sweet potato fries", ItemType: "dish", BasePriceDineIn: 3.99, BasePriceTakeout: 4.49})
-		db.Create(&MenuItem{CategoryID: 3, SKU: "BEV-001", Name: "Fresh Smoothie", Description: "Mixed berry protein smoothie", ItemType: "dish", BasePriceDineIn: 4.99, BasePriceTakeout: 5.49, MemberDiscount: 5})
-		db.Create(&MenuItem{CategoryID: 4, SKU: "CMB-001", Name: "Training Meal Deal", Description: "Wrap + Fries + Smoothie", ItemType: "combo", BasePriceDineIn: 14.99, BasePriceTakeout: 15.99, MemberDiscount: 15})
+		db.Create(&MenuItem{OrganizationID: 1, CategoryID: 1, SKU: "ENT-001", Name: "Grilled Chicken Wrap", Description: "Seasoned chicken with fresh veggies", ItemType: "dish", BasePriceDineIn: 8.99, BasePriceTakeout: 9.49, MemberDiscount: 10})
+		db.Create(&MenuItem{OrganizationID: 1, CategoryID: 1, SKU: "ENT-002", Name: "Veggie Burger", Description: "Plant-based patty with house sauce", ItemType: "dish", BasePriceDineIn: 7.99, BasePriceTakeout: 8.49, MemberDiscount: 10})
+		db.Create(&MenuItem{OrganizationID: 1, CategoryID: 2, SKU: "SID-001", Name: "Sweet Potato Fries", Description: "Crispy baked sweet potato fries", ItemType: "dish", BasePriceDineIn: 3.99, BasePriceTakeout: 4.49})
+		db.Create(&MenuItem{OrganizationID: 1, CategoryID: 3, SKU: "BEV-001", Name: "Fresh Smoothie", Description: "Mixed berry protein smoothie", ItemType: "dish", BasePriceDineIn: 4.99, BasePriceTakeout: 5.49, MemberDiscount: 5})
+		db.Create(&MenuItem{OrganizationID: 1, CategoryID: 4, SKU: "CMB-001", Name: "Training Meal Deal", Description: "Wrap + Fries + Smoothie", ItemType: "combo", BasePriceDineIn: 14.99, BasePriceTakeout: 15.99, MemberDiscount: 15})
 
 		log.Println("Seed users and demo data created. See README for default credentials.")
 	}

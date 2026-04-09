@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"campus-portal/internal/middleware"
 	"campus-portal/internal/models"
 	"campus-portal/internal/services"
+	"campus-portal/internal/views"
 
 	"github.com/gin-gonic/gin"
 )
@@ -67,17 +69,50 @@ func (h *HealthHandler) DashboardPage(c *gin.Context) {
 
 	maskedSSN := services.MaskSSN(user.SSN, user.Role)
 
-	c.HTML(http.StatusOK, "dashboard.html", gin.H{
-		"title":         "Health Dashboard",
-		"user":          user,
-		"record":        record,
-		"vitals":        vitals,
-		"encounters":    encounters,
-		"attachments":   attachments,
-		"maskedSSN":     maskedSSN,
-		"targetUser":    targetUserID,
-		"serviceErrors": serviceErrors,
-	})
+	// Build Templ dashboard data
+	dd := views.DashboardData{
+		User:          &views.UserInfo{FullName: user.FullName, Role: string(user.Role)},
+		MaskedSSN:     maskedSSN,
+		TargetUser:    targetUserID,
+		ServiceErrors: serviceErrors,
+		IsEditor:      user.Role == models.RoleClinician || user.Role == models.RoleAdmin,
+	}
+	if record != nil {
+		dd.HasRecord = true
+		dd.BloodType = record.BloodType
+		dd.Allergies = record.Allergies
+		dd.Conditions = record.Conditions
+		dd.Medications = record.Medications
+	}
+	for _, v := range vitals {
+		dd.Vitals = append(dd.Vitals, views.VitalRow{
+			RecordedAt: v.RecordedAt.Format("01/02/2006 03:04 PM"),
+			WeightLb:   fmt.Sprintf("%.1f", v.WeightLb),
+			BP:         fmt.Sprintf("%d/%d", v.BPSystolic, v.BPDiastolic),
+			TempF:      fmt.Sprintf("%.1f", v.TemperatureF),
+			HeartRate:  fmt.Sprintf("%d", v.HeartRate),
+		})
+	}
+	for _, e := range encounters {
+		dd.Encounters = append(dd.Encounters, views.EncounterRow{
+			Date:       e.EncounterDate.Format("01/02/2006 03:04 PM"),
+			Department: string(e.Department),
+			Complaint:  e.ChiefComplaint,
+			Diagnosis:  e.Diagnosis,
+			Treatment:  e.Treatment,
+			ID:         e.ID,
+		})
+	}
+	for _, a := range attachments {
+		dd.Attachments = append(dd.Attachments, views.AttachmentRow{
+			ID:       a.ID,
+			FileName: a.FileName,
+			SizeKB:   fmt.Sprintf("%.1f", float64(a.FileSize)/1024.0),
+			Date:     a.CreatedAt.Format("01/02/2006 03:04 PM"),
+		})
+	}
+
+	views.Render(c, http.StatusOK, views.DashboardPage(dd))
 }
 
 func (h *HealthHandler) UpdateHealthRecord(c *gin.Context) {
@@ -100,6 +135,13 @@ func (h *HealthHandler) UpdateHealthRecord(c *gin.Context) {
 		}
 	}
 
+	// Require non-empty reason for audit trail (prompt: "human-readable reason")
+	reason := strings.TrimSpace(c.PostForm("reason"))
+	if reason == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "reason is required for health record changes"})
+		return
+	}
+
 	_, err := h.HealthSvc.UpsertHealthRecord(
 		targetUserID,
 		user.ID,
@@ -107,7 +149,7 @@ func (h *HealthHandler) UpdateHealthRecord(c *gin.Context) {
 		c.PostForm("conditions"),
 		c.PostForm("medications"),
 		c.PostForm("blood_type"),
-		c.PostForm("reason"),
+		reason,
 	)
 
 	if err != nil {
@@ -170,7 +212,13 @@ func (h *HealthHandler) RecordVitals(c *gin.Context) {
 		RecordedBy:   user.ID,
 	}
 
-	if err := h.HealthSvc.RecordVitals(vital, c.PostForm("reason")); err != nil {
+	vitalsReason := strings.TrimSpace(c.PostForm("reason"))
+	if vitalsReason == "" {
+		c.HTML(http.StatusBadRequest, "error.html", gin.H{"error": "reason is required for vitals recording"})
+		return
+	}
+
+	if err := h.HealthSvc.RecordVitals(vital, vitalsReason); err != nil {
 		c.HTML(http.StatusInternalServerError, "error.html", gin.H{"error": err.Error()})
 		return
 	}
@@ -181,10 +229,28 @@ func (h *HealthHandler) RecordVitals(c *gin.Context) {
 func (h *HealthHandler) UploadAttachment(c *gin.Context) {
 	user := GetCurrentUser(c)
 	targetUserID := user.ID
+
+	// Students/faculty can ONLY upload to their own record.
+	// Staff cannot upload at all (not a health role).
+	// Clinicians/admins can upload within their department/org scope.
+	if user.Role == models.RoleStaff {
+		c.JSON(http.StatusForbidden, gin.H{"error": "staff cannot upload health documents"})
+		return
+	}
+
 	if id, err := strconv.ParseUint(c.PostForm("user_id"), 10, 64); err == nil {
-		if !h.enforceScopeForHealth(c, uint(id)) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "access denied: cannot upload to another user's record"})
-			return
+		if user.Role == models.RoleStudent || user.Role == models.RoleFaculty {
+			// Students/faculty: self-only, reject any other target
+			if uint(id) != user.ID {
+				c.JSON(http.StatusForbidden, gin.H{"error": "you can only upload documents to your own record"})
+				return
+			}
+		} else {
+			// Clinician/admin: enforce department/org scope
+			if !h.enforceScopeForHealth(c, uint(id)) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "access denied: cannot upload to another user's record"})
+				return
+			}
 		}
 		targetUserID = uint(id)
 	}
@@ -228,13 +294,14 @@ func (h *HealthHandler) UploadAttachment(c *gin.Context) {
 		"image/png":       true,
 		"image/gif":       true,
 	}
-	// Validate both the declared and detected content types
+	// STRICT file type validation: both declared AND detected types must be in the allowlist.
+	// application/octet-stream is NOT accepted — the file must be positively identified.
 	declaredType := file.Header.Get("Content-Type")
 	if !allowed[declaredType] {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "file type not allowed. Only PDF, JPEG, PNG, GIF accepted"})
 		return
 	}
-	if !allowed[detectedType] && detectedType != "application/octet-stream" {
+	if !allowed[detectedType] {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "file content does not match allowed types (detected: " + detectedType + ")"})
 		return
 	}
@@ -283,9 +350,42 @@ func (h *HealthHandler) DownloadAttachment(c *gin.Context) {
 // Clinician views
 func (h *HealthHandler) ClinicianPage(c *gin.Context) {
 	user := GetCurrentUser(c)
-	dept := models.Department(c.DefaultQuery("dept", "general"))
+	requestedDept := models.Department(c.DefaultQuery("dept", "general"))
 
-	encounters, _ := h.HealthSvc.GetEncountersByDept(dept)
+	// Admins can view any department. Clinicians/staff can only view their own.
+	dept := requestedDept
+	if user.Role != models.RoleAdmin {
+		if user.DepartmentID == nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "no department assigned — contact admin"})
+			return
+		}
+		// Look up the user's department record to get the department name
+		var deptRec models.DepartmentRecord
+		if err := h.HealthSvc.DB.First(&deptRec, *user.DepartmentID).Error; err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "department not found"})
+			return
+		}
+		// Map department record name to Department enum
+		deptMap := map[string]models.Department{
+			"General Medicine": models.DeptGeneral,
+			"Laboratory":      models.DeptLab,
+			"Pharmacy":        models.DeptPharmacy,
+			"Nursing":         models.DeptNursing,
+		}
+		if mapped, ok := deptMap[deptRec.Name]; ok {
+			dept = mapped
+		} else {
+			dept = models.DeptGeneral
+		}
+		// Reject if clinician tries to view a different department
+		if requestedDept != dept && c.Query("dept") != "" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "access denied: you can only view your own department"})
+			return
+		}
+	}
+
+	orgID, _ := c.Get("orgID")
+	encounters, _ := h.HealthSvc.GetEncountersByDept(dept, orgID.(uint))
 
 	c.HTML(http.StatusOK, "clinician.html", gin.H{
 		"title":      "Clinician Dashboard",
@@ -336,40 +436,46 @@ func (h *HealthHandler) RecordHistory(c *gin.Context) {
 		"encounters":     true,
 	}
 
-	// Only admins and clinicians can view audit history; others restricted to own records
-	switch user.Role {
-	case models.RoleStudent, models.RoleFaculty:
+	// ALL non-admin users are restricted to the allowlist. Staff included.
+	if user.Role != models.RoleAdmin {
 		if !allowedTables[table] {
+			c.JSON(http.StatusForbidden, gin.H{"error": "access denied: table not permitted"})
+			return
+		}
+	}
+
+	// Object-level authorization: verify the record belongs to the user or is within their scope
+	switch table {
+	case "health_records":
+		var rec models.HealthRecord
+		if err := h.HealthSvc.DB.First(&rec, recordID).Error; err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "record not found"})
+			return
+		}
+		if !h.enforceScopeForHealth(c, rec.UserID) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
 			return
 		}
-		// Verify the record belongs to this user
-		switch table {
-		case "health_records":
-			var rec models.HealthRecord
-			if err := h.HealthSvc.DB.First(&rec, recordID).Error; err != nil || rec.UserID != user.ID {
-				c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
-				return
-			}
-		case "encounters":
-			var enc models.Encounter
-			if err := h.HealthSvc.DB.First(&enc, recordID).Error; err != nil || enc.UserID != user.ID {
-				c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
-				return
-			}
-		case "vitals":
-			var v models.Vital
-			if err := h.HealthSvc.DB.First(&v, recordID).Error; err != nil || v.UserID != user.ID {
-				c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
-				return
-			}
+	case "encounters":
+		var enc models.Encounter
+		if err := h.HealthSvc.DB.First(&enc, recordID).Error; err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "record not found"})
+			return
 		}
-	case models.RoleClinician, models.RoleStaff:
-		if !allowedTables[table] && user.Role != models.RoleStaff {
+		if !h.enforceScopeForHealth(c, enc.UserID) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
 			return
 		}
-	// Admin can see everything
+	case "vitals":
+		var v models.Vital
+		if err := h.HealthSvc.DB.First(&v, recordID).Error; err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "record not found"})
+			return
+		}
+		if !h.enforceScopeForHealth(c, v.UserID) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+			return
+		}
 	}
 
 	logs, err := h.AuditSvc.GetHistory(table, uint(recordID))

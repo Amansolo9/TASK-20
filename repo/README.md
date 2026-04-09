@@ -43,11 +43,11 @@ The system is designed for **fully offline/internal network** deployment with no
 
 | Layer      | Technology                        |
 |------------|-----------------------------------|
-| Language   | Go 1.25                          |
+| Language   | Go 1.21+                          |
 | Web Server | Gin                               |
 | Frontend   | Templ + Go html/template + vanilla JS/CSS |
 | Database   | PostgreSQL 16                     |
-| Auth       | bcrypt + session cookies          |
+| Auth       | bcrypt + session cookies + locally-issued API tokens |
 | Container  | Docker / Docker Compose           |
 
 ---
@@ -62,13 +62,13 @@ Then open **http://localhost:8080** in your browser.
 
 That single command:
 1. Starts a PostgreSQL 16 container with healthcheck
-2. Builds the Go 1.25 binary in a multi-stage Docker build (includes Templ code generation)
+2. Builds the Go 1.21+ binary in a multi-stage Docker build (includes Templ code generation)
 3. Auto-generates secrets for session signing, HMAC, and field encryption (with startup warnings)
 4. Runs database migrations (GORM AutoMigrate + vitals partitioning + materialized views)
 5. Seeds default organizations, departments, venues, users, menu categories, and menu items
 6. Starts the Gin web server on port 8080
 
-No `.env` file or manual setup is required. All secrets are auto-generated for development. For production, override them via environment variables (see [Configuration](#configuration)).
+No `.env` file or manual setup is required for development. `SESSION_KEY` and `HMAC_SECRET` are auto-generated with startup warnings if not set. `FIELD_ENCRYPTION_KEY` uses a deterministic dev-only fallback in debug mode; **it is required in production** (`GIN_MODE=release`). For production, set all secrets via environment variables (see [Configuration](#configuration)).
 
 To stop:
 ```bash
@@ -180,7 +180,7 @@ Task-20/
 │   └── js/
 │       └── app.js                   # Client-side validation, drafts, AJAX helpers
 ├── migrations/
-│   └── 001_initial.sql              # Full SQL schema (reference, not used at runtime)
+│   └── 001_initial.sql              # LEGACY reference only — authoritative schema is GORM AutoMigrate in internal/models/database.go
 ├── db-init/
 │   └── 01-extensions.sql            # Postgres init script (pgcrypto extension)
 ├── uploads/                         # Runtime: uploaded documents stored here
@@ -190,7 +190,7 @@ Task-20/
 │       ├── layout.templ             # Templ components (login page, layout)
 │       ├── layout_templ.go          # Generated Go code from Templ
 │       └── render.go                # Templ-to-Gin rendering bridge
-├── Dockerfile                       # Multi-stage Go 1.25 build with Templ generation
+├── Dockerfile                       # Multi-stage Go 1.21+ build with Templ generation
 ├── docker-compose.yml               # Postgres + App orchestration (zero-config)
 ├── .dockerignore                    # Build context exclusions
 ├── .gitignore                       # Git exclusions (.env, binaries)
@@ -222,7 +222,7 @@ Task-20/
                      │  ├─ Clinician: /clinician/*                 │
                      │  ├─ Staff: /menu/manage/*                   │
                      │  ├─ Admin: /admin/*                         │
-                     │  └─ Internal API: /api/internal/* (HMAC)    │
+                     │  └─ Internal API: /api/internal/* (token+HMAC+admin) │
                      └──────────────┬───────────────────────────────┘
                                     │
                      ┌──────────────▼───────────────────────────────┐
@@ -265,7 +265,7 @@ Task-20/
 | RBAC middleware | Done | 5 roles: Student, Faculty, Clinician, Staff, Admin |
 | Data scoping (self/dept/org) | Done | `DataScope()` middleware + `EnforceSelfScope()` |
 | Temporary elevated access | Done | Admin grants role, auto-reverts after N hours (default 8) |
-| HMAC request signing | Done | `X-HMAC-Signature` + `X-HMAC-Timestamp` on `/api/internal/*` |
+| HMAC request signing | Done | `X-HMAC-Signature` + `X-HMAC-Timestamp` on all `/api/*` routes (including `/api/internal/*`) |
 | Rate limiting (60 req/min per IP) | Done | Sliding window with cleanup goroutine |
 | Docker Compose deployment | Done | Single `docker compose up --build` command |
 | Seed data on first boot | Done | 7 users, 4 venues, 4 menu categories, 5 menu items |
@@ -338,7 +338,7 @@ Task-20/
 | Admin performance dashboard | Done | Displays all 3 reports + slow query list |
 | PII masking (SSN) | Done | `***-**-1234` format for non-admin roles |
 | PII masking (email) | Done | `ja***@campus.local` format for student/faculty roles |
-| Internal API endpoints (HMAC) | Done | `/api/internal/clinic-utilization`, `/booking-fill-rates`, `/menu-sell-through` |
+| Internal API endpoints (token + HMAC + admin RBAC) | Done | `/api/internal/clinic-utilization`, `/booking-fill-rates`, `/menu-sell-through` — org-scoped, reads from materialized views |
 
 ---
 
@@ -377,11 +377,13 @@ Task-20/
 
 ### Materialized Views (3)
 
-| View | Purpose | Refresh |
-|------|---------|---------|
-| `mv_clinic_utilization` | Encounters per day per department | Every 15 min |
-| `mv_booking_fill_rates` | Bookings per day per venue (confirmed/canceled) | Every 15 min |
-| `mv_menu_sell_through` | Items sold + revenue per SKU | Every 15 min |
+All materialized views include `organization_id` for org-scoped filtering. Reporting endpoints read directly from these views rather than base tables.
+
+| View | Purpose | Org Column | Refresh |
+|------|---------|------------|---------|
+| `mv_clinic_utilization` | Encounters per day per department per org | `organization_id` (from clinician's user) | Every 15 min |
+| `mv_booking_fill_rates` | Bookings per day per venue per org (confirmed/canceled) | `organization_id` (from booking) | Every 15 min |
+| `mv_menu_sell_through` | Items sold + revenue per SKU per org | `organization_id` (from menu item) | Every 15 min |
 
 ---
 
@@ -400,19 +402,26 @@ Task-20/
 |--------|------|-------------|
 | GET | `/dashboard` | Health dashboard |
 | GET | `/logout` | End session |
-| POST | `/health/update` | Update health record |
-| POST | `/health/upload` | Upload document (multipart) |
 | GET | `/health/history` | Get audit log for a record |
 | GET | `/bookings` | View my bookings |
 | POST | `/bookings` | Create booking |
 | POST | `/bookings/:id/transition` | Change booking status |
 | GET | `/bookings/:id/audit` | View booking audit trail |
-| GET | `/api/slots` | Available time slots |
-| GET | `/api/match-partners` | Find matching partners |
-| GET | `/api/check-conflicts` | Check for booking conflicts |
 | GET | `/menu` | Browse dining menu |
 | POST | `/menu/order` | Place an order |
-| GET | `/api/price` | Calculate item price |
+
+### Authenticated (self-upload)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/health/upload` | Upload document (students/faculty: self only; clinicians/admin: scoped; staff: denied) |
+| POST | `/api/tokens` | Issue API token (session-auth required) |
+
+### Clinician + Admin (health mutations)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/health/update` | Update health record (reason required) |
 
 ### Clinician + Admin
 
@@ -447,20 +456,42 @@ Task-20/
 | POST | `/admin/users/:id/toggle` | Activate/deactivate |
 | POST | `/admin/users/:id/role` | Change role |
 | POST | `/admin/users/:id/temp-access` | Grant temporary access |
+| POST | `/admin/users/:id/reset-password` | Reset user password (for imported users) |
 | GET | `/admin/performance` | Performance dashboard |
 | POST | `/admin/refresh-views` | Refresh materialized views |
 | GET | `/admin/webhooks` | Webhook management |
 | POST | `/admin/webhooks` | Register webhook endpoint |
 | GET | `/admin/bookings` | All bookings (admin view) |
 
-### Internal (HMAC-signed)
+### Internal (Token + HMAC + Admin RBAC)
+
+Requires Bearer token, valid HMAC signature, AND admin role. All responses are org-scoped by default — the caller's organization_id filters returned data. Report endpoints read from materialized views refreshed every 15 minutes.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/internal/clinic-utilization` | Clinic report data |
-| GET | `/api/internal/booking-fill-rates` | Booking report data |
-| GET | `/api/internal/menu-sell-through` | Menu report data |
-| POST | `/webhooks/receive` | Inbound webhook receiver |
+| GET | `/api/internal/clinic-utilization` | Clinic report data (from `mv_clinic_utilization`, org-scoped) |
+| GET | `/api/internal/booking-fill-rates` | Booking report data (from `mv_booking_fill_rates`, org-scoped) |
+| GET | `/api/internal/menu-sell-through` | Menu report data (from `mv_menu_sell_through`, org-scoped) |
+| POST | `/api/internal/webhooks/receive` | Inbound webhook receiver |
+
+---
+
+## Authentication Model
+
+The system uses two auth methods:
+
+| Method | Scope | How it works |
+|--------|-------|-------------|
+| **Session cookies** | Browser pages (`/dashboard`, `/bookings`, `/menu`, etc.) | Login via `/login` sets an `HttpOnly` `session_id` cookie (24h expiry). CSRF double-submit cookie protects POST forms. |
+| **API tokens + HMAC** | All REST API endpoints (`/api/*`) | Requires both Bearer token AND HMAC-signed request. Token issued via `POST /api/tokens` (session-auth). HMAC uses `X-HMAC-Signature`, `X-HMAC-Timestamp`, `X-Body-SHA256` headers. Body hash verified from actual bytes. |
+
+**Policy summary — one consistent rule for all API routes:**
+
+- All routes under `/api/*` (including `/api/internal/*`) require a locally-issued **Bearer token** AND a valid **HMAC-signed request** — session cookies are not accepted on API routes.
+- `/api/internal/*` additionally requires **admin role**; responses are always **org-scoped** (the caller's organization_id filters all returned data).
+- Internal reporting endpoints (`/api/internal/clinic-utilization`, `/booking-fill-rates`, `/menu-sell-through`) read from **materialized views** refreshed every 15 minutes, with a 5-minute in-memory cache TTL.
+- Browser pages that need API data obtain a token via `POST /api/tokens` (session-auth required), then sign each request client-side.
+- Rate limiting applies globally at 60 req/min per client IP across all routes.
 
 ---
 
@@ -473,7 +504,7 @@ Task-20/
 | RBAC | Per-route-group middleware checking user role |
 | Data scoping | Students see own data only; clinicians see dept; admin sees org |
 | Temporary access | Auto-reverts via background ticker (checked every 1 min) |
-| HMAC request signing | SHA-256 HMAC of `method:path:timestamp`, 5-min window |
+| HMAC request signing | SHA-256 HMAC of `method:path:timestamp:bodyHash` on all `/api/*` routes, 5-min skew window, body hash verified from actual bytes |
 | Rate limiting | 60 requests/minute per client IP, sliding window |
 | CSRF protection | Per-session token validated on all state-changing POST requests |
 | File upload validation | Server-side: 10MB max, allowlisted MIME types only, scope-checked |
@@ -481,7 +512,7 @@ Task-20/
 | Audit trail | Immutable log with SHA-256 fingerprint per revision, scope-enforced |
 | At-rest encryption | AES-256-GCM for SSN, health record fields (allergies, conditions, medications) |
 | PII masking | SSN: `***-**-1234`; Email: `ja***@domain` (role-based display) |
-| Secret management | SESSION_KEY, HMAC_SECRET, FIELD_ENCRYPTION_KEY auto-generated with warnings if not set |
+| Secret management | SESSION_KEY, HMAC_SECRET auto-generated with warnings if not set; FIELD_ENCRYPTION_KEY uses deterministic dev fallback in debug mode, **required** in production |
 | SQL injection | Prevented by GORM parameterized queries |
 | XSS | Prevented by Go html/template auto-escaping |
 | Webhook security | Receiver endpoint moved under HMAC-protected `/api/internal/` prefix |
@@ -510,11 +541,11 @@ All settings are configured via environment variables. Everything has sensible d
 | `SERVER_PORT` | `8080` | Web server port |
 | `SESSION_KEY` | (auto-generated) | Session signing key (hex, 64 chars) |
 | `HMAC_SECRET` | (auto-generated) | HMAC signing key (hex, 64 chars) |
-| `FIELD_ENCRYPTION_KEY` | (auto-generated) | AES-256 key for PHI encryption (base64, 32 bytes) |
+| `FIELD_ENCRYPTION_KEY` | dev fallback / **required in production** | AES-256 key for PHI encryption (base64, 32 bytes). Uses deterministic dev key if unset in debug mode; fails startup in `GIN_MODE=release`. |
 | `SECURE_COOKIES` | `false` | Set `true` when serving behind TLS |
 | `UPLOAD_DIR` | `./uploads` | File upload storage path |
 | `WATCHED_DIR` | `./watched_folder` | CSV import watch path |
-| `GIN_MODE` | `release` | Gin framework mode |
+| `GIN_MODE` | `debug` | Gin framework mode (`debug` for development, `release` for production) |
 
 **Production deployment:** All default credentials (`campus_admin`/`campus_secret`, seed password `password123`) must be changed. Generate secrets with `openssl rand -base64 32` for `FIELD_ENCRYPTION_KEY` and `openssl rand -hex 32` for `SESSION_KEY`/`HMAC_SECRET`. Pass them as environment variables or via a `.env` file.
 

@@ -20,20 +20,24 @@ func NewMenuService(db *gorm.DB, audit *AuditService) *MenuService {
 }
 
 // Categories
-func (s *MenuService) GetCategories() ([]models.MenuCategory, error) {
+func (s *MenuService) GetCategories(orgID uint) ([]models.MenuCategory, error) {
 	var cats []models.MenuCategory
-	err := s.DB.Order("sort_order ASC").Find(&cats).Error
+	err := s.DB.Where("organization_id = ?", orgID).Order("sort_order ASC").Find(&cats).Error
 	return cats, err
 }
 
-func (s *MenuService) CreateCategory(cat *models.MenuCategory) error {
-	return s.DB.Create(cat).Error
+func (s *MenuService) CreateCategory(cat *models.MenuCategory, editorID uint) error {
+	if err := s.DB.Create(cat).Error; err != nil {
+		return err
+	}
+	s.Audit.LogChange("menu_categories", cat.ID, "create", editorID, "Category created", cat)
+	return nil
 }
 
 // Menu Items
-func (s *MenuService) GetMenuItems(categoryID *uint) ([]models.MenuItem, error) {
+func (s *MenuService) GetMenuItems(orgID uint, categoryID *uint) ([]models.MenuItem, error) {
 	var items []models.MenuItem
-	q := s.DB.Order("name ASC")
+	q := s.DB.Where("organization_id = ?", orgID).Order("name ASC")
 	if categoryID != nil {
 		q = q.Where("category_id = ?", *categoryID)
 	}
@@ -90,11 +94,12 @@ func (s *MenuService) GetSubstitutes(itemID uint) ([]models.MenuItem, error) {
 	return items, nil
 }
 
-func (s *MenuService) SetSubstitutes(itemID uint, substituteIDs []uint) error {
+func (s *MenuService) SetSubstitutes(itemID uint, substituteIDs []uint, editorID uint) error {
 	s.DB.Where("menu_item_id = ?", itemID).Delete(&models.ItemSubstitute{})
 	for _, subID := range substituteIDs {
 		s.DB.Create(&models.ItemSubstitute{MenuItemID: itemID, SubstituteID: subID})
 	}
+	s.Audit.LogChange("item_substitutes", itemID, "update", editorID, "Substitutes updated", substituteIDs)
 	return nil
 }
 
@@ -105,8 +110,12 @@ func (s *MenuService) GetChoices(itemID uint) ([]models.MenuItemChoice, error) {
 	return choices, err
 }
 
-func (s *MenuService) CreateChoice(choice *models.MenuItemChoice) error {
-	return s.DB.Create(choice).Error
+func (s *MenuService) CreateChoice(choice *models.MenuItemChoice, editorID uint) error {
+	if err := s.DB.Create(choice).Error; err != nil {
+		return err
+	}
+	s.Audit.LogChange("menu_item_choices", choice.ID, "create", editorID, "Choice created", choice)
+	return nil
 }
 
 // Sell Windows
@@ -116,21 +125,26 @@ func (s *MenuService) GetSellWindows(itemID uint) ([]models.SellWindow, error) {
 	return windows, err
 }
 
-func (s *MenuService) SetSellWindows(itemID uint, windows []models.SellWindow) error {
+func (s *MenuService) SetSellWindows(itemID uint, windows []models.SellWindow, editorID uint) error {
 	s.DB.Where("menu_item_id = ?", itemID).Delete(&models.SellWindow{})
 	for i := range windows {
 		windows[i].MenuItemID = itemID
 		s.DB.Create(&windows[i])
 	}
+	s.Audit.LogChange("sell_windows", itemID, "update", editorID, "Sell windows updated", windows)
 	return nil
 }
 
 func (s *MenuService) IsWithinSellWindow(itemID uint, now time.Time) (bool, error) {
-	// Check holiday blackout
+	// Check org-scoped holiday blackout: only apply blackouts for the item's own org
+	item, err := s.GetMenuItem(itemID)
+	if err != nil {
+		return false, err
+	}
 	var blackout models.HolidayBlackout
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	if err := s.DB.Where("date = ?", today).First(&blackout).Error; err == nil {
-		return false, nil // Blacked out
+	if err := s.DB.Where("date = ? AND organization_id = ?", today, item.OrganizationID).First(&blackout).Error; err == nil {
+		return false, nil // Blacked out for this org
 	}
 
 	var windows []models.SellWindow
@@ -151,17 +165,22 @@ func (s *MenuService) IsWithinSellWindow(itemID uint, now time.Time) (bool, erro
 }
 
 // Holiday Blackouts
-func (s *MenuService) GetBlackouts() ([]models.HolidayBlackout, error) {
+func (s *MenuService) GetBlackouts(orgID uint) ([]models.HolidayBlackout, error) {
 	var blackouts []models.HolidayBlackout
-	err := s.DB.Order("date ASC").Find(&blackouts).Error
+	err := s.DB.Where("organization_id = ?", orgID).Order("date ASC").Find(&blackouts).Error
 	return blackouts, err
 }
 
-func (s *MenuService) CreateBlackout(b *models.HolidayBlackout) error {
-	return s.DB.Create(b).Error
+func (s *MenuService) CreateBlackout(b *models.HolidayBlackout, editorID uint) error {
+	if err := s.DB.Create(b).Error; err != nil {
+		return err
+	}
+	s.Audit.LogChange("holiday_blackouts", b.ID, "create", editorID, "Blackout created", b)
+	return nil
 }
 
-func (s *MenuService) DeleteBlackout(id uint) error {
+func (s *MenuService) DeleteBlackout(id uint, editorID uint) error {
+	s.Audit.LogChange("holiday_blackouts", id, "delete", editorID, "Blackout removed", nil)
 	return s.DB.Delete(&models.HolidayBlackout{}, id).Error
 }
 
@@ -173,8 +192,12 @@ func (s *MenuService) GetActivePromotions(itemID uint) ([]models.Promotion, erro
 	return promos, err
 }
 
-func (s *MenuService) CreatePromotion(promo *models.Promotion) error {
-	return s.DB.Create(promo).Error
+func (s *MenuService) CreatePromotion(promo *models.Promotion, editorID uint) error {
+	if err := s.DB.Create(promo).Error; err != nil {
+		return err
+	}
+	s.Audit.LogChange("promotions", promo.ID, "create", editorID, "Promotion created", promo)
+	return nil
 }
 
 // Pricing

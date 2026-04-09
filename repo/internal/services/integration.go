@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,23 +139,56 @@ func (w *CSVWatcher) importEnrollment(rows [][]string, headers map[string]int) e
 			role = "student" // Default role
 		}
 
+		// Derive org from CSV field or default to first org
+		orgName := getField(row, headers, "organization")
+		var orgID uint
+		if orgName != "" {
+			var org models.Organization
+			if err := w.DB.Where("name = ?", orgName).First(&org).Error; err == nil {
+				orgID = org.ID
+			}
+		}
+		if orgID == 0 {
+			var org models.Organization
+			w.DB.First(&org)
+			orgID = org.ID
+		}
+
+		// Eligibility: CSV can include "eligible" field (true/false). Ineligible users are deactivated.
+		eligible := getField(row, headers, "eligible")
+		isEligible := eligible == "" || strings.EqualFold(eligible, "true") || eligible == "1"
+
+		// Department sync from CSV
+		deptName := getField(row, headers, "department")
+		var deptID *uint
+		if deptName != "" {
+			var dept models.DepartmentRecord
+			if err := w.DB.Where("name = ? AND organization_id = ?", deptName, orgID).First(&dept).Error; err == nil {
+				deptID = &dept.ID
+			}
+		}
+
 		var user models.User
 		err := w.DB.Where("username = ?", username).First(&user).Error
 		if err == gorm.ErrRecordNotFound {
 			user = models.User{
 				Username:       username,
-				PasswordHash:   "$2a$10$placeholder", // Needs reset
+				PasswordHash:   "$2a$10$placeholder", // Needs admin password reset
 				FullName:       fullName,
 				Email:          email,
 				Role:           models.Role(role),
-				OrganizationID: 1,
-				Active:         true,
+				OrganizationID: orgID,
+				DepartmentID:   deptID,
+				Active:         isEligible,
 			}
 			w.DB.Create(&user)
 		} else if err == nil {
 			user.FullName = fullName
 			user.Email = email
-			user.Active = true
+			user.Active = isEligible
+			if deptID != nil {
+				user.DepartmentID = deptID
+			}
 			w.DB.Save(&user)
 		}
 	}
@@ -207,18 +241,57 @@ func NewWebhookService(db *gorm.DB) *WebhookService {
 }
 
 func (s *WebhookService) RegisterEndpoint(url, eventType, secret string) error {
+	return s.RegisterEndpointForOrg(url, eventType, secret, 0)
+}
+
+// IsInternalURL checks if a URL points to a private/internal network address only.
+func IsInternalURL(rawURL string) bool {
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	// Allow loopback, .local, .internal, .corp, and RFC1918 patterns
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	if strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") || strings.HasSuffix(host, ".corp") {
+		return true
+	}
+	// Check RFC1918 prefixes
+	for _, prefix := range []string{"10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.",
+		"172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.",
+		"172.28.", "172.29.", "172.30.", "172.31."} {
+		if strings.HasPrefix(host, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *WebhookService) RegisterEndpointForOrg(rawURL, eventType, secret string, orgID uint) error {
+	if !IsInternalURL(rawURL) {
+		return fmt.Errorf("webhook URL must target an internal network address")
+	}
 	ep := &models.WebhookEndpoint{
-		URL:       url,
-		EventType: eventType,
-		Secret:    secret,
-		Active:    true,
+		OrganizationID: orgID,
+		URL:            rawURL,
+		EventType:      eventType,
+		Secret:         secret,
+		Active:         true,
 	}
 	return s.DB.Create(ep).Error
 }
 
-func (s *WebhookService) Dispatch(eventType string, payload interface{}) {
+// DispatchForOrg sends webhook events scoped to a specific organization.
+// orgID is required and must be > 0 to enforce tenant isolation.
+func (s *WebhookService) DispatchForOrg(eventType string, payload interface{}, orgID uint) {
+	if orgID == 0 {
+		log.Printf("WARNING: DispatchForOrg called with orgID=0, skipping broadcast to prevent cross-tenant leak")
+		return
+	}
 	var endpoints []models.WebhookEndpoint
-	s.DB.Where("event_type = ? AND active = true", eventType).Find(&endpoints)
+	s.DB.Where("event_type = ? AND active = true AND organization_id = ?", eventType, orgID).Find(&endpoints)
 
 	data, _ := json.Marshal(payload)
 
@@ -228,23 +301,28 @@ func (s *WebhookService) Dispatch(eventType string, payload interface{}) {
 }
 
 func (s *WebhookService) deliver(endpoint models.WebhookEndpoint, payload []byte) {
-	// Sign the payload
+	// Delivery-time revalidation: ensure target is still internal
+	if !IsInternalURL(endpoint.URL) {
+		s.logDelivery(endpoint.ID, string(payload), 0, "delivery blocked: non-internal URL", 1)
+		return
+	}
+	// Sign the payload once (payload bytes are immutable)
 	mac := hmac.New(sha256.New, []byte(endpoint.Secret))
 	mac.Write(payload)
 	signature := hex.EncodeToString(mac.Sum(nil))
 
-	req, err := http.NewRequest("POST", endpoint.URL, bytes.NewReader(payload))
-	if err != nil {
-		s.logDelivery(endpoint.ID, string(payload), 0, err.Error(), 1)
-		return
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Webhook-Signature", signature)
-	req.Header.Set("X-Webhook-Event", endpoint.EventType)
-
 	maxRetries := 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Create a FRESH request with a new body reader on every attempt
+		req, err := http.NewRequest("POST", endpoint.URL, bytes.NewReader(payload))
+		if err != nil {
+			s.logDelivery(endpoint.ID, string(payload), 0, err.Error(), attempt)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Webhook-Signature", signature)
+		req.Header.Set("X-Webhook-Event", endpoint.EventType)
+
 		resp, err := s.client.Do(req)
 		if err != nil {
 			if attempt == maxRetries {
@@ -253,7 +331,7 @@ func (s *WebhookService) deliver(endpoint models.WebhookEndpoint, payload []byte
 			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
 		}
-		defer resp.Body.Close()
+		resp.Body.Close()
 		s.logDelivery(endpoint.ID, string(payload), resp.StatusCode, "", attempt)
 		return
 	}
@@ -275,9 +353,9 @@ func (s *WebhookService) GetDeliveries(endpointID uint) ([]models.WebhookDeliver
 	return deliveries, err
 }
 
-func (s *WebhookService) GetEndpoints() ([]models.WebhookEndpoint, error) {
+func (s *WebhookService) GetEndpoints(orgID uint) ([]models.WebhookEndpoint, error) {
 	var endpoints []models.WebhookEndpoint
-	err := s.DB.Find(&endpoints).Error
+	err := s.DB.Where("organization_id = ?", orgID).Find(&endpoints).Error
 	return endpoints, err
 }
 
@@ -316,16 +394,66 @@ func (s *ReportingService) RefreshMaterializedViews() {
 	}
 }
 
-func (s *ReportingService) GetClinicUtilization() ([]map[string]interface{}, error) {
-	return s.cachedQuery("clinic_utilization", "SELECT * FROM mv_clinic_utilization LIMIT 100")
+// Org-scoped reporting: reads from materialized views with organization_id filter.
+// The materialized views are refreshed on a schedule (default every 15 min) and
+// provide precomputed aggregates for fast report queries.
+func (s *ReportingService) GetClinicUtilization(orgID uint) ([]map[string]interface{}, error) {
+	query := `SELECT day, department, encounter_count
+		FROM mv_clinic_utilization
+		WHERE organization_id = ?
+		ORDER BY day DESC LIMIT 100`
+	return s.orgQuery(fmt.Sprintf("clinic_utilization_%d", orgID), query, orgID)
 }
 
-func (s *ReportingService) GetBookingFillRates() ([]map[string]interface{}, error) {
-	return s.cachedQuery("booking_fill_rates", "SELECT * FROM mv_booking_fill_rates LIMIT 100")
+func (s *ReportingService) GetBookingFillRates(orgID uint) ([]map[string]interface{}, error) {
+	query := `SELECT day, venue_id, total_bookings, confirmed, canceled
+		FROM mv_booking_fill_rates
+		WHERE organization_id = ?
+		ORDER BY day DESC LIMIT 100`
+	return s.orgQuery(fmt.Sprintf("booking_fill_%d", orgID), query, orgID)
 }
 
-func (s *ReportingService) GetMenuSellThrough() ([]map[string]interface{}, error) {
-	return s.cachedQuery("menu_sell_through", "SELECT * FROM mv_menu_sell_through LIMIT 100")
+func (s *ReportingService) GetMenuSellThrough(orgID uint) ([]map[string]interface{}, error) {
+	query := `SELECT sku, name, total_sold, total_revenue
+		FROM mv_menu_sell_through
+		WHERE organization_id = ?
+		ORDER BY total_sold DESC LIMIT 100`
+	return s.orgQuery(fmt.Sprintf("menu_sell_%d", orgID), query, orgID)
+}
+
+func (s *ReportingService) orgQuery(cacheKey, query string, orgID uint) ([]map[string]interface{}, error) {
+	s.mu.RLock()
+	if entry, ok := s.cache[cacheKey]; ok && time.Now().Before(entry.expiresAt) {
+		s.mu.RUnlock()
+		return entry.data.([]map[string]interface{}), nil
+	}
+	s.mu.RUnlock()
+
+	var results []map[string]interface{}
+	rows, err := s.DB.Raw(query, orgID).Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols, _ := rows.Columns()
+	for rows.Next() {
+		row := make(map[string]interface{})
+		vals := make([]interface{}, len(cols))
+		valPtrs := make([]interface{}, len(cols))
+		for i := range vals {
+			valPtrs[i] = &vals[i]
+		}
+		rows.Scan(valPtrs...)
+		for i, col := range cols {
+			row[col] = vals[i]
+		}
+		results = append(results, row)
+	}
+
+	s.mu.Lock()
+	s.cache[cacheKey] = &cacheEntry{data: results, expiresAt: time.Now().Add(s.cacheTTL)}
+	s.mu.Unlock()
+	return results, nil
 }
 
 func (s *ReportingService) cachedQuery(key, query string) ([]map[string]interface{}, error) {
@@ -378,6 +506,59 @@ func (s *ReportingService) CleanupSlowQueryLogs(retentionDays int) {
 	if result.RowsAffected > 0 {
 		log.Printf("Cleaned up %d slow query log entries older than %d days", result.RowsAffected, retentionDays)
 	}
+}
+
+// ===================== ASYNC REPORTING =====================
+
+// SubmitReportJob creates a pending report job and executes it asynchronously.
+func (s *ReportingService) SubmitReportJob(orgID uint, reportType string, requestedBy uint) (*models.ReportJob, error) {
+	job := &models.ReportJob{
+		OrganizationID: orgID,
+		ReportType:     reportType,
+		Status:         "pending",
+		RequestedBy:    requestedBy,
+	}
+	if err := s.DB.Create(job).Error; err != nil {
+		return nil, err
+	}
+	go s.executeReportJob(job.ID)
+	return job, nil
+}
+
+func (s *ReportingService) executeReportJob(jobID uint) {
+	var job models.ReportJob
+	if err := s.DB.First(&job, jobID).Error; err != nil {
+		return
+	}
+	s.DB.Model(&job).Update("status", "running")
+
+	var data []map[string]interface{}
+	var err error
+	switch job.ReportType {
+	case "clinic_utilization":
+		data, err = s.GetClinicUtilization(job.OrganizationID)
+	case "booking_fill_rates":
+		data, err = s.GetBookingFillRates(job.OrganizationID)
+	case "menu_sell_through":
+		data, err = s.GetMenuSellThrough(job.OrganizationID)
+	default:
+		err = fmt.Errorf("unknown report type: %s", job.ReportType)
+	}
+
+	now := time.Now()
+	if err != nil {
+		s.DB.Model(&job).Updates(map[string]interface{}{"status": "failed", "result": err.Error(), "completed_at": now})
+		return
+	}
+	jsonData, _ := json.Marshal(data)
+	s.DB.Model(&job).Updates(map[string]interface{}{"status": "completed", "result": string(jsonData), "completed_at": now})
+}
+
+// GetReportJob returns a report job by ID, org-scoped.
+func (s *ReportingService) GetReportJob(jobID uint, orgID uint) (*models.ReportJob, error) {
+	var job models.ReportJob
+	err := s.DB.Where("id = ? AND organization_id = ?", jobID, orgID).First(&job).Error
+	return &job, err
 }
 
 // ===================== PII MASKING =====================

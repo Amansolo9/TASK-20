@@ -38,7 +38,9 @@ services:
       FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY-}
       UPLOAD_DIR: /app/uploads
       WATCHED_DIR: /app/watched_folder
-      GIN_MODE: release
+      # GIN_MODE defaults to debug. Set to "release" for production AFTER setting
+      # FIELD_ENCRYPTION_KEY, SESSION_KEY, and HMAC_SECRET in .env.
+      GIN_MODE: ${GIN_MODE:-debug}
     volumes:
       - uploads:/app/uploads
       - watched:/app/watched_folder

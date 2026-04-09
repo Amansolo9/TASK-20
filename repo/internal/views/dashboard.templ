@@ -1,0 +1,166 @@
+package views
+
+import "fmt"
+
+type VitalRow struct {
+	RecordedAt string
+	WeightLb   string
+	BP         string
+	TempF      string
+	HeartRate  string
+}
+
+type EncounterRow struct {
+	Date       string
+	Department string
+	Complaint  string
+	Diagnosis  string
+	Treatment  string
+	ID         uint
+}
+
+type AttachmentRow struct {
+	ID       uint
+	FileName string
+	SizeKB   string
+	Date     string
+}
+
+type DashboardData struct {
+	User           *UserInfo
+	MaskedSSN      string
+	TargetUser     uint
+	HasRecord      bool
+	BloodType      string
+	Allergies      string
+	Conditions     string
+	Medications    string
+	Vitals         []VitalRow
+	Encounters     []EncounterRow
+	Attachments    []AttachmentRow
+	ServiceErrors  []string
+	IsEditor       bool // clinician or admin
+}
+
+templ DashboardContent(d DashboardData) {
+	<div class="page-header">
+		<h2>Health Dashboard</h2>
+		if d.MaskedSSN != "" {
+			<span class="text-muted">SSN: { d.MaskedSSN }</span>
+		}
+	</div>
+
+	if len(d.ServiceErrors) > 0 {
+		for _, e := range d.ServiceErrors {
+			<div class="alert alert-warning">{ e }</div>
+		}
+	}
+
+	<div class="grid grid-3">
+		<!-- Health Summary -->
+		<div class="card">
+			<div class="card-header"><h3>Health Summary</h3></div>
+			<div class="card-body">
+				if d.HasRecord {
+					<div class="info-row"><label>Blood Type:</label><span>{ d.BloodType }</span></div>
+					<div class="info-row"><label>Allergies:</label><span>{ orDefault(d.Allergies, "None recorded") }</span></div>
+					<div class="info-row"><label>Conditions:</label><span>{ orDefault(d.Conditions, "None recorded") }</span></div>
+					<div class="info-row"><label>Medications:</label><span>{ orDefault(d.Medications, "None recorded") }</span></div>
+				} else {
+					<p class="text-muted">No health record on file.</p>
+				}
+			</div>
+		</div>
+
+		<!-- Recent Vitals -->
+		<div class="card">
+			<div class="card-header"><h3>Recent Vitals</h3></div>
+			<div class="card-body">
+				if len(d.Vitals) > 0 {
+					<table class="table">
+						<thead><tr><th>Date</th><th>Weight</th><th>BP</th><th>Temp</th><th>HR</th></tr></thead>
+						<tbody>
+							for _, v := range d.Vitals {
+								<tr>
+									<td>{ v.RecordedAt }</td>
+									<td>{ v.WeightLb }</td>
+									<td>{ v.BP }</td>
+									<td>{ v.TempF }</td>
+									<td>{ v.HeartRate }</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				} else {
+					<p class="text-muted">No vitals recorded.</p>
+				}
+			</div>
+		</div>
+
+		<!-- Documents -->
+		<div class="card">
+			<div class="card-header"><h3>Documents</h3></div>
+			<div class="card-body">
+				<form id="uploadForm" enctype="multipart/form-data" class="upload-form">
+					<input type="hidden" name="user_id" value={ fmt.Sprint(d.TargetUser) }/>
+					<div class="form-group">
+						<label>Upload Document (PDF/Image, max 10MB)</label>
+						<input type="file" id="fileInput" name="file" accept=".pdf,.jpg,.jpeg,.png,.gif" onchange="validateFile(this)"/>
+						<div id="fileError" class="alert alert-error" style="display:none;"></div>
+						<div id="fileSuccess" class="alert alert-success" style="display:none;"></div>
+					</div>
+					<button type="submit" class="btn btn-primary" id="uploadBtn" disabled>Upload</button>
+				</form>
+				if len(d.Attachments) > 0 {
+					<hr/>
+					<ul class="file-list">
+						for _, a := range d.Attachments {
+							<li>
+								<span class="file-icon">&#128196;</span>
+								<a href={ templ.SafeURL(fmt.Sprintf("/health/download/%d", a.ID)) }>{ a.FileName }</a>
+								<span class="text-muted">({ a.SizeKB } KB)</span>
+								<span class="text-muted">{ a.Date }</span>
+							</li>
+						}
+					</ul>
+				}
+			</div>
+		</div>
+	</div>
+
+	<!-- Recent Encounters -->
+	<div class="card mt-4">
+		<div class="card-header"><h3>Recent Encounters</h3></div>
+		<div class="card-body">
+			if len(d.Encounters) > 0 {
+				<table class="table">
+					<thead><tr><th>Date</th><th>Dept</th><th>Complaint</th><th>Diagnosis</th><th>Treatment</th></tr></thead>
+					<tbody>
+						for _, e := range d.Encounters {
+							<tr>
+								<td>{ e.Date }</td>
+								<td><span class="badge badge-dept">{ e.Department }</span></td>
+								<td>{ e.Complaint }</td>
+								<td>{ e.Diagnosis }</td>
+								<td>{ e.Treatment }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			} else {
+				<p class="text-muted">No encounters recorded.</p>
+			}
+		</div>
+	</div>
+}
+
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
+
+templ DashboardPage(d DashboardData) {
+	@Layout(fmt.Sprintf("Health Dashboard - %s", d.User.Role), d.User, DashboardContent(d))
+}

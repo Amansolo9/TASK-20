@@ -1,6 +1,7 @@
 -- Campus Wellness & Training Operations Portal
--- Initial Database Schema Migration
--- Run this against PostgreSQL before starting the application
+-- LEGACY REFERENCE ONLY — NOT AUTHORITATIVE
+-- The authoritative schema is managed by GORM AutoMigrate in internal/models/database.go.
+-- This file is retained for documentation purposes. Do not run it directly.
 
 -- Enable extensions
 CREATE EXTENSION IF NOT EXISTS pgcrypto;

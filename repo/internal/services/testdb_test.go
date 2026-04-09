@@ -58,6 +58,8 @@ func getTestDB(t *testing.T) *gorm.DB {
 		&models.HealthRecord{},
 		&models.Vital{},
 		&models.Encounter{},
+		&models.WebhookEndpoint{},
+		&models.WebhookDelivery{},
 	)
 
 	return db
@@ -80,4 +82,6 @@ func cleanupTestData(db *gorm.DB) {
 	db.Exec("DELETE FROM audit_logs")
 	db.Exec("DELETE FROM temp_accesses")
 	db.Exec("DELETE FROM sessions")
+	db.Exec("DELETE FROM webhook_deliveries")
+	db.Exec("DELETE FROM webhook_endpoints")
 }

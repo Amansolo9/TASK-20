@@ -20,7 +20,6 @@ document.addEventListener('DOMContentLoaded', function() {
     if (!token) return;
 
     document.querySelectorAll('form[method="POST"], form[method="post"]').forEach(function(form) {
-        // Skip if already has a csrf_token field
         if (form.querySelector('input[name="csrf_token"]')) return;
         const input = document.createElement('input');
         input.type = 'hidden';
@@ -30,8 +29,54 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 
-// ===================== CLEAR DRAFTS ON LOGOUT =====================
-// Clears sessionStorage (clinician drafts with patient data) when user logs out.
+// ===================== API TOKEN MANAGEMENT =====================
+// Obtain a locally-issued API token for REST API calls (/api/*).
+// The token is cached in sessionStorage and used by apiFetch().
+let _apiCredsPromise = null;
+function getAPICreds() {
+    if (_apiCredsPromise) return _apiCredsPromise;
+    const t = sessionStorage.getItem('api_token');
+    const h = sessionStorage.getItem('api_hmac');
+    if (t && h) return Promise.resolve({token:t, hmac:h});
+    const csrf = getCSRFToken();
+    _apiCredsPromise = fetch('/api/tokens', {
+        method: 'POST',
+        headers: {'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},
+        body: 'description=browser'
+    }).then(r=>r.json()).then(d=>{
+        if(d.token&&d.hmac_secret){sessionStorage.setItem('api_token',d.token);sessionStorage.setItem('api_hmac',d.hmac_secret);return{token:d.token,hmac:d.hmac_secret};}
+        throw new Error('no creds');
+    }).catch(()=>null).finally(()=>{_apiCredsPromise=null;});
+    return _apiCredsPromise;
+}
+async function hmacSign(secret,method,path,ts,bodyHash){
+    const enc=new TextEncoder();
+    const key=await crypto.subtle.importKey('raw',enc.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+    const sig=await crypto.subtle.sign('HMAC',key,enc.encode(method+':'+path+':'+ts+':'+bodyHash));
+    return Array.from(new Uint8Array(sig)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function sha256Hex(data){
+    const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(data||''));
+    return Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+// Wrapper: injects Bearer token + HMAC signature on every /api/* call.
+async function apiFetch(url, opts) {
+    const creds = await getAPICreds();
+    if (!creds) return fetch(url, opts);
+    const headers = (opts&&opts.headers)?{...opts.headers}:{};
+    headers['Authorization'] = 'Bearer ' + creds.token;
+    const parsed = new URL(url, window.location.origin);
+    const method = (opts&&opts.method)?opts.method.toUpperCase():'GET';
+    const body = (opts&&opts.body)?String(opts.body):'';
+    const ts = new Date().toISOString();
+    const bh = await sha256Hex(body);
+    headers['X-HMAC-Signature'] = await hmacSign(creds.hmac,method,parsed.pathname,ts,bh);
+    headers['X-HMAC-Timestamp'] = ts;
+    headers['X-Body-SHA256'] = bh;
+    return fetch(url, {...opts, method, headers});
+}
+
+// Clear API token on logout
 document.addEventListener('DOMContentLoaded', function() {
     const logoutLink = document.querySelector('a[href="/logout"]');
     if (logoutLink) {
@@ -40,6 +85,8 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 });
+
+// (Draft clearing handled by API token logout block above)
 
 // ===================== FORM SUBMIT LOADING STATES =====================
 // Auto-disable submit buttons and show loading text on all POST form submissions.
@@ -203,7 +250,7 @@ function loadCalendar() {
     selectedSlotValue = null;
     if (hiddenInput) hiddenInput.value = '';
 
-    fetch(`/api/slots?venue_id=${venueId}&date=${date}`)
+    apiFetch(`/api/slots?venue_id=${venueId}&date=${date}`)
         .then(res => res.json())
         .then(data => {
             grid.innerHTML = '';
@@ -258,7 +305,7 @@ function findPartners() {
     results.style.display = 'block';
     results.innerHTML = 'Searching...';
 
-    fetch(`/api/match-partners?skill_range=${skillRange}&weight_range=${weightRange}&style=${style}`)
+    apiFetch(`/api/match-partners?skill_range=${skillRange}&weight_range=${weightRange}&style=${style}`)
         .then(res => res.json())
         .then(data => {
             if (!data.matches || data.matches.length === 0) {
@@ -298,8 +345,11 @@ function checkBeforeSubmit() {
     // Async conflict check — prevent default submit, then re-submit if clear
     if (warning) warning.style.display = 'none';
 
-    fetch(url)
-        .then(res => res.json())
+    apiFetch(url)
+        .then(res => {
+            if (!res.ok) throw new Error('Conflict check failed (status ' + res.status + ')');
+            return res.json();
+        })
         .then(data => {
             if (data.conflicts && data.conflicts.length > 0) {
                 warning.innerHTML = '<strong>Conflicts detected:</strong><ul>' +
@@ -313,11 +363,13 @@ function checkBeforeSubmit() {
                 }
             }
         })
-        .catch(() => {
-            // On error, allow submission
-            if (form) {
-                form._skipConflictCheck = true;
-                form.submit();
+        .catch(err => {
+            // On error, show warning and require explicit user confirmation before submitting
+            if (warning) {
+                warning.innerHTML = '<strong>Could not verify conflicts:</strong> ' + escapeHtml(err.message) +
+                    '. Please retry before submitting.' +
+                    '<br><button type="button" onclick="checkBeforeSubmit()" style="margin-top:8px;" class="btn btn-secondary btn-sm">Retry Check</button>';
+                warning.style.display = 'block';
             }
         });
 
@@ -507,7 +559,7 @@ function addToOrder(itemId) {
     const orderType = document.getElementById('orderType')?.value || 'dine_in';
     const isMember = document.getElementById('isMember')?.checked ? 'true' : 'false';
 
-    fetch(`/api/price?item_id=${itemId}&order_type=${orderType}&is_member=${isMember}`)
+    apiFetch(`/api/price?item_id=${itemId}&order_type=${orderType}&is_member=${isMember}`)
         .then(res => res.json())
         .then(data => {
             const price = data.price || 0;
@@ -567,7 +619,7 @@ function recalculateAll() {
     if (totalSpan) totalSpan.textContent = '...';
 
     const promises = orderItems.map((item, i) =>
-        fetch(`/api/price?item_id=${item.id}&order_type=${orderType}&is_member=${isMember}`)
+        apiFetch(`/api/price?item_id=${item.id}&order_type=${orderType}&is_member=${isMember}`)
             .then(res => res.json())
             .then(data => { orderItems[i].unitPrice = data.price || 0; })
             .catch(() => {})

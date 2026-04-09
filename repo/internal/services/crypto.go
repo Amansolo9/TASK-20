@@ -17,9 +17,11 @@ var fieldEncryptionKey []byte
 func InitEncryption() error {
 	key := os.Getenv("FIELD_ENCRYPTION_KEY")
 	if key == "" {
-		// Auto-generate a stable key for development. WARNING: data will be
-		// unreadable if the container is recreated without persisting this key.
-		fieldEncryptionKey = []byte("DefaultDevKey!ChangeInProd!32b!")  // exactly 32 bytes
+		ginMode := os.Getenv("GIN_MODE")
+		if ginMode == "release" {
+			return errors.New("FIELD_ENCRYPTION_KEY is required in production (GIN_MODE=release). Generate with: openssl rand -base64 32")
+		}
+		fieldEncryptionKey = []byte("DefaultDevKey!ChangeInProd!32b!")
 		log.Println("WARNING: FIELD_ENCRYPTION_KEY not set — using built-in dev key. Set this env var for production.")
 		return nil
 	}

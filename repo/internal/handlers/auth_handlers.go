@@ -59,6 +59,24 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	c.Redirect(http.StatusFound, "/dashboard")
 }
 
+// IssueToken creates a locally-issued API token for the authenticated user.
+func (h *AuthHandler) IssueToken(c *gin.Context) {
+	user := GetCurrentUser(c)
+	description := c.DefaultPostForm("description", "API token")
+
+	tok, tokenStr, err := h.AuthSvc.IssueAPIToken(user.ID, description, 24*time.Hour)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"token":       tokenStr,
+		"hmac_secret": h.Cfg.HMACSecret,
+		"expires_at":  tok.ExpiresAt.Format("01/02/2006 03:04 PM"),
+		"message":     "Store this token securely — it cannot be retrieved again.",
+	})
+}
+
 func (h *AuthHandler) Logout(c *gin.Context) {
 	sessionID, _ := c.Cookie("session_id")
 	if sessionID != "" {
@@ -68,10 +86,31 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	c.Redirect(http.StatusFound, "/login")
 }
 
-// Admin user management
+// getOrgID returns the authenticated user's organization ID from context.
+func getOrgID(c *gin.Context) uint {
+	orgID, _ := c.Get("orgID")
+	return orgID.(uint)
+}
+
+// verifyTargetSameOrg checks that a target user belongs to the admin's org. Returns false and sends 403 if not.
+func (h *AuthHandler) verifyTargetSameOrg(c *gin.Context, targetUserID uint) bool {
+	var target models.User
+	if err := h.DB.First(&target, targetUserID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return false
+	}
+	if target.OrganizationID != getOrgID(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "cannot administer users outside your organization"})
+		return false
+	}
+	return true
+}
+
+// Admin user management — all queries scoped to admin's org
 func (h *AuthHandler) UsersPage(c *gin.Context) {
+	orgID := getOrgID(c)
 	var users []models.User
-	h.DB.Find(&users)
+	h.DB.Where("organization_id = ?", orgID).Find(&users)
 	c.HTML(http.StatusOK, "admin_users.html", gin.H{
 		"title": "User Management",
 		"users": users,
@@ -85,11 +124,14 @@ func (h *AuthHandler) ToggleUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user ID"})
 		return
 	}
+	if !h.verifyTargetSameOrg(c, uint(id)) {
+		return
+	}
 	active := c.PostForm("active") == "true"
 	currentUser := GetCurrentUser(c)
 
 	h.AuthSvc.ToggleUserActive(uint(id), active)
-	h.AuthSvc.InvalidateUserSessions(uint(id)) // Force re-auth immediately
+	h.AuthSvc.InvalidateUserSessions(uint(id))
 
 	action := "deactivated"
 	if active {
@@ -105,6 +147,9 @@ func (h *AuthHandler) ChangeRole(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user ID"})
 		return
 	}
+	if !h.verifyTargetSameOrg(c, uint(id)) {
+		return
+	}
 	role := models.Role(c.PostForm("role"))
 	if !isValidRole(role) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid role"})
@@ -112,7 +157,6 @@ func (h *AuthHandler) ChangeRole(c *gin.Context) {
 	}
 	currentUser := GetCurrentUser(c)
 
-	// Get old role for audit
 	var targetUser models.User
 	h.DB.First(&targetUser, uint(id))
 
@@ -128,6 +172,9 @@ func (h *AuthHandler) GrantTempAccess(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user ID"})
+		return
+	}
+	if !h.verifyTargetSameOrg(c, uint(id)) {
 		return
 	}
 	role := models.Role(c.PostForm("role"))
@@ -179,12 +226,22 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	var deptID *uint
+	currentUser := GetCurrentUser(c)
 	if d, err := strconv.ParseUint(c.PostForm("department_id"), 10, 64); err == nil {
 		did := uint(d)
+		// Validate department belongs to the admin's organization
+		var dept models.DepartmentRecord
+		if err := h.DB.First(&dept, did).Error; err != nil || dept.OrganizationID != currentUser.OrganizationID {
+			c.HTML(http.StatusOK, "register.html", gin.H{
+				"title": "Register New User", "error": "Department does not belong to your organization", "user": currentUser,
+			})
+			return
+		}
 		deptID = &did
 	}
 
-	newUser, err := h.AuthSvc.Register(username, password, fullName, email, role, 1, deptID)
+	// Derive org from the admin creating the user — not hardcoded
+	newUser, err := h.AuthSvc.Register(username, password, fullName, email, role, currentUser.OrganizationID, deptID)
 	if err != nil {
 		c.HTML(http.StatusOK, "register.html", gin.H{
 			"title": "Register New User",
@@ -194,9 +251,33 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	currentUser := GetCurrentUser(c)
 	h.AuditSvc.LogChange("users", newUser.ID, "user_created", currentUser.ID,
 		fmt.Sprintf("User %s created with role %s", username, role), newUser)
+	c.Redirect(http.StatusFound, "/admin/users")
+}
+
+// ResetPassword allows an admin to reset a user's password (e.g., for CSV-imported users).
+func (h *AuthHandler) ResetPassword(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user ID"})
+		return
+	}
+	if !h.verifyTargetSameOrg(c, uint(id)) {
+		return
+	}
+	newPassword := c.PostForm("new_password")
+	if len(newPassword) < 8 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
+		return
+	}
+	if err := h.AuthSvc.ResetPassword(uint(id), newPassword); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	currentUser := GetCurrentUser(c)
+	h.AuthSvc.InvalidateUserSessions(uint(id))
+	h.AuditSvc.LogChange("users", uint(id), "password_reset", currentUser.ID, "Password reset by admin", nil)
 	c.Redirect(http.StatusFound, "/admin/users")
 }
 

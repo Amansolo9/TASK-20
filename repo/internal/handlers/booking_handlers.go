@@ -3,6 +3,7 @@ package handlers
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"campus-portal/internal/models"
@@ -72,7 +73,8 @@ func (h *BookingHandler) GetSlots(c *gin.Context) {
 	}
 
 	// Return all slots with availability status — frontend renders entirely from this
-	allSlots := h.BookingSvc.GetAllSlots(uint(venueID), date)
+	orgID, _ := c.Get("orgID")
+	allSlots := h.BookingSvc.GetAllSlots(uint(venueID), date, orgID.(uint))
 	c.JSON(http.StatusOK, gin.H{"slots": allSlots})
 }
 
@@ -82,7 +84,8 @@ func (h *BookingHandler) MatchPartners(c *gin.Context) {
 	weightRange, _ := strconv.ParseFloat(c.DefaultQuery("weight_range", "20"), 64)
 	style := c.Query("style")
 
-	matches, err := h.BookingSvc.MatchPartners(user.ID, skillRange, weightRange, style)
+	orgID, _ := c.Get("orgID")
+	matches, err := h.BookingSvc.MatchPartners(user.ID, skillRange, weightRange, style, orgID.(uint))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -121,7 +124,8 @@ func (h *BookingHandler) CheckConflicts(c *gin.Context) {
 		partnerID = &uid
 	}
 
-	conflicts, err := h.BookingSvc.CheckConflicts(user.ID, partnerID, uint(venueID), slotStart)
+	orgID, _ := c.Get("orgID")
+	conflicts, err := h.BookingSvc.CheckConflicts(user.ID, partnerID, uint(venueID), slotStart, orgID.(uint))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -155,7 +159,8 @@ func (h *BookingHandler) CreateBooking(c *gin.Context) {
 		partnerID = &uid
 	}
 
-	_, err = h.BookingSvc.CreateBooking(user.ID, partnerID, uint(venueID), slotStart, user.ID)
+	orgID, _ := c.Get("orgID")
+	_, err = h.BookingSvc.CreateBooking(user.ID, partnerID, uint(venueID), slotStart, user.ID, orgID.(uint))
 	if err != nil {
 		c.HTML(http.StatusBadRequest, "error.html", gin.H{"error": err.Error()})
 		return
@@ -172,12 +177,21 @@ func (h *BookingHandler) TransitionBooking(c *gin.Context) {
 		return
 	}
 	newStatus := models.BookingStatus(c.PostForm("status"))
-	note := c.PostForm("note")
+	note := strings.TrimSpace(c.PostForm("note"))
+	if note == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "a reason/note is required for booking status changes"})
+		return
+	}
 
-	// Authorization: user must own the booking or be staff/admin
+	// Authorization: booking must belong to user's org, and user must own it or be staff/admin
 	var booking models.Booking
 	if err := h.DB.First(&booking, uint(bookingID)).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
+		return
+	}
+	orgID, _ := c.Get("orgID")
+	if booking.OrganizationID != orgID.(uint) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
 		return
 	}
 	if user.Role != models.RoleAdmin && user.Role != models.RoleStaff {
@@ -203,10 +217,15 @@ func (h *BookingHandler) BookingAudit(c *gin.Context) {
 		return
 	}
 
-	// Verify the user owns this booking or is staff/admin
+	// Verify the booking belongs to the user's org, and user owns it or is staff/admin
 	var booking models.Booking
 	if err := h.DB.First(&booking, uint(bookingID)).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
+		return
+	}
+	orgID, _ := c.Get("orgID")
+	if booking.OrganizationID != orgID.(uint) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
 		return
 	}
 	if user.Role != models.RoleAdmin && user.Role != models.RoleStaff {
@@ -227,7 +246,8 @@ func (h *BookingHandler) BookingAudit(c *gin.Context) {
 // All bookings for staff/admin
 func (h *BookingHandler) AllBookingsPage(c *gin.Context) {
 	user := GetCurrentUser(c)
-	bookings, _ := h.BookingSvc.GetAllBookings()
+	orgID, _ := c.Get("orgID")
+	bookings, _ := h.BookingSvc.GetAllBookingsByOrg(orgID.(uint))
 	venues, _ := h.BookingSvc.GetVenues()
 
 	userIDs := make(map[uint]bool)

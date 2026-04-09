@@ -57,7 +57,14 @@ func Load() *Config {
 		SlowQueryMs:       500,
 		CacheTTL:          5 * time.Minute,
 		MVRefreshInterval: 15 * time.Minute,
-		SecureCookies:     getEnv("SECURE_COOKIES", "false") == "true",
+		// Default secure cookies to true in release mode, false in dev
+		SecureCookies: func() bool {
+			explicit := os.Getenv("SECURE_COOKIES")
+			if explicit != "" {
+				return explicit == "true"
+			}
+			return os.Getenv("GIN_MODE") == "release"
+		}(),
 	}
 }
 

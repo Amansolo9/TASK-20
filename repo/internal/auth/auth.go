@@ -203,6 +203,72 @@ func encryptSSN(plaintext string) (string, error) {
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
+// ===================== API TOKEN MANAGEMENT =====================
+
+// IssueAPIToken creates a locally-issued bearer token bound to the user and their org.
+func (s *AuthService) IssueAPIToken(userID uint, description string, ttl time.Duration) (*models.APIToken, string, error) {
+	var user models.User
+	if err := s.DB.First(&user, userID).Error; err != nil {
+		return nil, "", err
+	}
+	if !user.Active {
+		return nil, "", errors.New("cannot issue token for inactive user")
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, "", err
+	}
+	tokenStr := hex.EncodeToString(raw)
+	tok := &models.APIToken{
+		Token:          tokenStr,
+		UserID:         user.ID,
+		OrganizationID: user.OrganizationID,
+		Description:    description,
+		ExpiresAt:      time.Now().Add(ttl),
+		Active:         true,
+	}
+	if err := s.DB.Create(tok).Error; err != nil {
+		return nil, "", err
+	}
+	return tok, tokenStr, nil
+}
+
+// ValidateAPIToken validates a bearer token string, returning the bound user.
+func (s *AuthService) ValidateAPIToken(tokenStr string) (*models.User, error) {
+	var tok models.APIToken
+	if err := s.DB.Where("token = ? AND active = true AND expires_at > ?", tokenStr, time.Now()).First(&tok).Error; err != nil {
+		return nil, errors.New("invalid or expired API token")
+	}
+	var user models.User
+	if err := s.DB.First(&user, tok.UserID).Error; err != nil {
+		return nil, errors.New("token user not found")
+	}
+	if !user.Active {
+		return nil, errors.New("token user deactivated")
+	}
+	// Apply temp access
+	var ta models.TempAccess
+	if err := s.DB.Where("user_id = ? AND reverted = false AND expires_at > ?", user.ID, time.Now()).
+		Order("created_at DESC").First(&ta).Error; err == nil {
+		user.Role = ta.GrantedRole
+	}
+	return &user, nil
+}
+
+// ResetPassword allows an admin to reset a user's password (e.g., for imported users).
+func (s *AuthService) ResetPassword(userID uint, newPassword string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	return s.DB.Model(&models.User{}).Where("id = ?", userID).Update("password_hash", string(hash)).Error
+}
+
+// RevokeAPITokens deactivates all tokens for a user.
+func (s *AuthService) RevokeAPITokens(userID uint) {
+	s.DB.Model(&models.APIToken{}).Where("user_id = ?", userID).Update("active", false)
+}
+
 func (s *AuthService) ChangeUserRole(userID uint, newRole models.Role) error {
 	return s.DB.Model(&models.User{}).Where("id = ?", userID).Update("role", newRole).Error
 }

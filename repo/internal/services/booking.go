@@ -19,15 +19,17 @@ func NewBookingService(db *gorm.DB, audit *AuditService, webhook *WebhookService
 	return &BookingService{DB: db, Audit: audit, Webhook: webhook}
 }
 
-// MatchPartners finds compatible training partners based on criteria
-func (s *BookingService) MatchPartners(userID uint, skillRange int, weightRange float64, style string) ([]models.TrainerProfile, error) {
+// MatchPartners finds compatible training partners within the same org.
+func (s *BookingService) MatchPartners(userID uint, skillRange int, weightRange float64, style string, orgID uint) ([]models.TrainerProfile, error) {
 	var requester models.TrainerProfile
 	if err := s.DB.Where("user_id = ?", userID).First(&requester).Error; err != nil {
 		return nil, errors.New("trainer profile not found")
 	}
 
 	var matches []models.TrainerProfile
-	query := s.DB.Where("user_id != ?", userID)
+	// Only match partners whose user belongs to the same organization
+	query := s.DB.Joins("JOIN users u ON u.id = trainer_profiles.user_id AND u.organization_id = ?", orgID).
+		Where("trainer_profiles.user_id != ?", userID)
 
 	if skillRange > 0 {
 		query = query.Where("skill_level BETWEEN ? AND ?",
@@ -52,8 +54,8 @@ type SlotInfo struct {
 }
 
 // GetAvailableSlots returns available 30-min slots for a venue on a given date
-func (s *BookingService) GetAvailableSlots(venueID uint, date time.Time) ([]time.Time, error) {
-	allSlots := s.GetAllSlots(venueID, date)
+func (s *BookingService) GetAvailableSlots(venueID uint, date time.Time, orgID uint) ([]time.Time, error) {
+	allSlots := s.GetAllSlots(venueID, date, orgID)
 	var available []time.Time
 	for _, slot := range allSlots {
 		if slot.Available {
@@ -65,13 +67,13 @@ func (s *BookingService) GetAvailableSlots(venueID uint, date time.Time) ([]time
 
 // GetAllSlots returns all 30-min slots for a venue on a date, each marked available or booked.
 // This is the single source of truth for slot generation — the frontend renders directly from this.
-func (s *BookingService) GetAllSlots(venueID uint, date time.Time) []SlotInfo {
+func (s *BookingService) GetAllSlots(venueID uint, date time.Time, orgID uint) []SlotInfo {
 	startOfDay := time.Date(date.Year(), date.Month(), date.Day(), 8, 0, 0, 0, date.Location())
 	endOfDay := time.Date(date.Year(), date.Month(), date.Day(), 20, 0, 0, 0, date.Location())
 
 	var bookings []models.Booking
-	s.DB.Where("venue_id = ? AND slot_start >= ? AND slot_start < ? AND status != ?",
-		venueID, startOfDay, endOfDay, models.BookingCanceled).Find(&bookings)
+	s.DB.Where("venue_id = ? AND organization_id = ? AND slot_start >= ? AND slot_start < ? AND status != ?",
+		venueID, orgID, startOfDay, endOfDay, models.BookingCanceled).Find(&bookings)
 
 	bookedTimes := make(map[int64]bool)
 	for _, b := range bookings {
@@ -88,36 +90,40 @@ func (s *BookingService) GetAllSlots(venueID uint, date time.Time) []SlotInfo {
 	return slots
 }
 
-// CheckConflicts detects double-bookings or venue overlaps
-func (s *BookingService) CheckConflicts(requesterID uint, partnerID *uint, venueID uint, slotStart time.Time) ([]string, error) {
+// CheckConflicts detects double-bookings or venue overlaps, org-scoped.
+func (s *BookingService) CheckConflicts(requesterID uint, partnerID *uint, venueID uint, slotStart time.Time, orgID uint) ([]string, error) {
 	slotEnd := slotStart.Add(30 * time.Minute)
+	activeStatuses := []string{string(models.BookingCanceled), string(models.BookingRefunded)}
 	var conflicts []string
 
-	// Check requester conflicts
+	// All conflict queries are org-scoped to prevent cross-tenant leakage
 	var count int64
 	s.DB.Model(&models.Booking{}).Where(
-		"requester_id = ? AND slot_start < ? AND slot_end > ? AND status NOT IN ?",
-		requesterID, slotEnd, slotStart, []string{string(models.BookingCanceled), string(models.BookingRefunded)},
+		"organization_id = ? AND requester_id = ? AND slot_start < ? AND slot_end > ? AND status NOT IN ?",
+		orgID, requesterID, slotEnd, slotStart, activeStatuses,
 	).Count(&count)
 	if count > 0 {
 		conflicts = append(conflicts, "You already have a booking during this time slot")
 	}
 
-	// Check partner conflicts
 	if partnerID != nil {
+		// Validate partner belongs to the same org
+		var partnerUser models.User
+		if err := s.DB.First(&partnerUser, *partnerID).Error; err != nil || partnerUser.OrganizationID != orgID {
+			return nil, errors.New("partner does not belong to your organization")
+		}
 		s.DB.Model(&models.Booking{}).Where(
-			"(requester_id = ? OR partner_id = ?) AND slot_start < ? AND slot_end > ? AND status NOT IN ?",
-			*partnerID, *partnerID, slotEnd, slotStart, []string{string(models.BookingCanceled), string(models.BookingRefunded)},
+			"organization_id = ? AND (requester_id = ? OR partner_id = ?) AND slot_start < ? AND slot_end > ? AND status NOT IN ?",
+			orgID, *partnerID, *partnerID, slotEnd, slotStart, activeStatuses,
 		).Count(&count)
 		if count > 0 {
 			conflicts = append(conflicts, "Selected partner has a conflicting booking")
 		}
 	}
 
-	// Check venue overlap
 	s.DB.Model(&models.Booking{}).Where(
-		"venue_id = ? AND slot_start < ? AND slot_end > ? AND status NOT IN ?",
-		venueID, slotEnd, slotStart, []string{string(models.BookingCanceled), string(models.BookingRefunded)},
+		"organization_id = ? AND venue_id = ? AND slot_start < ? AND slot_end > ? AND status NOT IN ?",
+		orgID, venueID, slotEnd, slotStart, activeStatuses,
 	).Count(&count)
 
 	var venue models.Venue
@@ -130,8 +136,15 @@ func (s *BookingService) CheckConflicts(requesterID uint, partnerID *uint, venue
 }
 
 // CreateBooking creates a new booking after validation
-func (s *BookingService) CreateBooking(requesterID uint, partnerID *uint, venueID uint, slotStart time.Time, changedBy uint) (*models.Booking, error) {
-	conflicts, err := s.CheckConflicts(requesterID, partnerID, venueID, slotStart)
+func (s *BookingService) CreateBooking(requesterID uint, partnerID *uint, venueID uint, slotStart time.Time, changedBy uint, orgID uint) (*models.Booking, error) {
+	// Validate partner belongs to same org if specified
+	if partnerID != nil {
+		var partnerUser models.User
+		if err := s.DB.First(&partnerUser, *partnerID).Error; err != nil || partnerUser.OrganizationID != orgID {
+			return nil, errors.New("partner does not belong to your organization")
+		}
+	}
+	conflicts, err := s.CheckConflicts(requesterID, partnerID, venueID, slotStart, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -140,12 +153,13 @@ func (s *BookingService) CreateBooking(requesterID uint, partnerID *uint, venueI
 	}
 
 	booking := &models.Booking{
-		RequesterID: requesterID,
-		PartnerID:   partnerID,
-		VenueID:     venueID,
-		SlotStart:   slotStart,
-		SlotEnd:     slotStart.Add(30 * time.Minute),
-		Status:      models.BookingInitiated,
+		OrganizationID: orgID,
+		RequesterID:    requesterID,
+		PartnerID:      partnerID,
+		VenueID:        venueID,
+		SlotStart:      slotStart,
+		SlotEnd:        slotStart.Add(30 * time.Minute),
+		Status:         models.BookingInitiated,
 	}
 
 	err = s.DB.Transaction(func(tx *gorm.DB) error {
@@ -163,10 +177,10 @@ func (s *BookingService) CreateBooking(requesterID uint, partnerID *uint, venueI
 	})
 
 	if err == nil && s.Webhook != nil {
-		s.Webhook.Dispatch("booking.created", map[string]interface{}{
+		s.Webhook.DispatchForOrg("booking.created", map[string]interface{}{
 			"booking_id": booking.ID, "requester_id": requesterID, "venue_id": venueID,
 			"slot_start": slotStart, "status": "initiated",
-		})
+		}, orgID)
 	}
 
 	return booking, err
@@ -227,10 +241,10 @@ func (s *BookingService) TransitionBooking(bookingID uint, newStatus models.Book
 
 	if err == nil && s.Webhook != nil {
 		eventType := "booking." + string(newStatus)
-		s.Webhook.Dispatch(eventType, map[string]interface{}{
+		s.Webhook.DispatchForOrg(eventType, map[string]interface{}{
 			"booking_id": bookingID, "old_status": string(oldStatus),
 			"new_status": string(newStatus), "changed_by": changedBy, "note": note,
-		})
+		}, booking.OrganizationID)
 	}
 
 	return err
@@ -259,5 +273,12 @@ func (s *BookingService) GetVenues() ([]models.Venue, error) {
 func (s *BookingService) GetAllBookings() ([]models.Booking, error) {
 	var bookings []models.Booking
 	err := s.DB.Order("slot_start DESC").Find(&bookings).Error
+	return bookings, err
+}
+
+// GetAllBookingsByOrg returns all bookings belonging to the given org.
+func (s *BookingService) GetAllBookingsByOrg(orgID uint) ([]models.Booking, error) {
+	var bookings []models.Booking
+	err := s.DB.Where("organization_id = ?", orgID).Order("slot_start DESC").Find(&bookings).Error
 	return bookings, err
 }

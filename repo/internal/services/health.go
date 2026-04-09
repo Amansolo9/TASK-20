@@ -129,9 +129,12 @@ func (s *HealthService) GetEncounters(userID uint) ([]models.Encounter, error) {
 	return encounters, err
 }
 
-func (s *HealthService) GetEncountersByDept(dept models.Department) ([]models.Encounter, error) {
+func (s *HealthService) GetEncountersByDept(dept models.Department, orgID uint) ([]models.Encounter, error) {
 	var encounters []models.Encounter
-	err := s.DB.Where("department = ?", dept).Order("encounter_date DESC").Find(&encounters).Error
+	// Org-scoped: only return encounters where the clinician belongs to the caller's org
+	err := s.DB.Joins("JOIN users u ON u.id = encounters.clinician_id AND u.organization_id = ?", orgID).
+		Where("encounters.department = ?", dept).
+		Order("encounters.encounter_date DESC").Find(&encounters).Error
 	return encounters, err
 }
 

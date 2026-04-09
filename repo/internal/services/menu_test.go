@@ -171,7 +171,7 @@ func TestSubstitutes(t *testing.T) {
 	require.NotZero(t, item1.ID)
 	require.NotZero(t, item2.ID)
 
-	svc.SetSubstitutes(item1.ID, []uint{item2.ID})
+	svc.SetSubstitutes(item1.ID, []uint{item2.ID}, 1)
 	subs, err := svc.GetSubstitutes(item1.ID)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(subs))
