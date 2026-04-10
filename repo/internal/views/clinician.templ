@@ -1,0 +1,185 @@
+package views
+
+import "fmt"
+
+type ClinicianEncounterRow struct {
+	EncounterDate  string
+	UserID         uint
+	ChiefComplaint string
+	Diagnosis      string
+	Treatment      string
+}
+
+type ClinicianData struct {
+	User       *UserInfo
+	Encounters []ClinicianEncounterRow
+	ActiveDept string
+}
+
+templ ClinicianContent(d ClinicianData) {
+	<div class="page-header">
+		<h2>Clinician Dashboard</h2>
+		<div class="dept-tabs">
+			<a href="/clinician?dept=general" class={ templ.KV("tab", true), templ.KV("active", d.ActiveDept == "general") }>General</a>
+			<a href="/clinician?dept=lab" class={ templ.KV("tab", true), templ.KV("active", d.ActiveDept == "lab") }>Laboratory</a>
+			<a href="/clinician?dept=pharmacy" class={ templ.KV("tab", true), templ.KV("active", d.ActiveDept == "pharmacy") }>Pharmacy</a>
+			<a href="/clinician?dept=nursing" class={ templ.KV("tab", true), templ.KV("active", d.ActiveDept == "nursing") }>Nursing</a>
+		</div>
+	</div>
+
+	<div class="grid grid-2">
+		<!-- New Encounter Form -->
+		<div class="card">
+			<div class="card-header">
+				<h3>Record Encounter</h3>
+			</div>
+			<div class="card-body">
+				<form method="POST" action="/clinician/encounter" id="encounterForm">
+					<input type="hidden" name="department" value={ d.ActiveDept }/>
+					<div class="form-group">
+						<label>Patient ID</label>
+						<input type="number" name="patient_id" required placeholder="Enter patient user ID"/>
+					</div>
+					<div class="form-group">
+						<label>Chief Complaint</label>
+						<textarea name="chief_complaint" rows="2" required
+							oninput="saveDraft('encounterForm')"></textarea>
+					</div>
+					<div class="form-group">
+						<label>Notes</label>
+						<textarea name="notes" rows="3" oninput="saveDraft('encounterForm')"></textarea>
+					</div>
+					<div class="form-group">
+						<label>Diagnosis</label>
+						<textarea name="diagnosis" rows="2" oninput="saveDraft('encounterForm')"></textarea>
+					</div>
+					<div class="form-group">
+						<label>Treatment</label>
+						<textarea name="treatment" rows="2" oninput="saveDraft('encounterForm')"></textarea>
+					</div>
+					<div class="btn-group">
+						<button type="submit" class="btn btn-primary">Save Encounter</button>
+						<button type="button" class="btn btn-outline" onclick="clearDraft('encounterForm')">Clear Draft</button>
+					</div>
+				</form>
+			</div>
+		</div>
+
+		<!-- Record Vitals Form -->
+		<div class="card">
+			<div class="card-header">
+				<h3>Record Vitals</h3>
+			</div>
+			<div class="card-body">
+				<form method="POST" action="/clinician/vitals" id="vitalsForm">
+					<div class="form-group">
+						<label>Patient ID</label>
+						<input type="number" name="user_id" required placeholder="Enter patient user ID"/>
+					</div>
+					<div class="form-row">
+						<div class="form-group">
+							<label>Weight (lb)</label>
+							<input type="number" name="weight_lb" step="0.1" placeholder="e.g., 165.5"
+								oninput="saveDraft('vitalsForm')"/>
+						</div>
+						<div class="form-group">
+							<label>Temperature (°F)</label>
+							<input type="number" name="temperature_f" step="0.1" placeholder="e.g., 98.6"
+								oninput="saveDraft('vitalsForm')"/>
+						</div>
+					</div>
+					<div class="form-row">
+						<div class="form-group">
+							<label>BP Systolic</label>
+							<input type="number" name="bp_systolic" placeholder="e.g., 120"
+								oninput="saveDraft('vitalsForm')"/>
+						</div>
+						<div class="form-group">
+							<label>BP Diastolic</label>
+							<input type="number" name="bp_diastolic" placeholder="e.g., 80"
+								oninput="saveDraft('vitalsForm')"/>
+						</div>
+					</div>
+					<div class="form-group">
+						<label>Heart Rate (bpm)</label>
+						<input type="number" name="heart_rate" placeholder="e.g., 72"
+							oninput="saveDraft('vitalsForm')"/>
+					</div>
+					<div class="form-group">
+						<label>Reason</label>
+						<input type="text" name="reason" placeholder="Routine check-up" required/>
+					</div>
+					<div class="btn-group">
+						<button type="submit" class="btn btn-primary">Save Vitals</button>
+						<button type="button" class="btn btn-outline" onclick="clearDraft('vitalsForm')">Clear Draft</button>
+					</div>
+				</form>
+			</div>
+		</div>
+	</div>
+
+	<!-- Recent Encounters for Department -->
+	<div class="card mt-4">
+		<div class="card-header">
+			<h3>Recent { d.ActiveDept } Encounters</h3>
+		</div>
+		<div class="card-body">
+			if len(d.Encounters) > 0 {
+				<table class="table">
+					<thead>
+						<tr>
+							<th>Date</th>
+							<th>Patient ID</th>
+							<th>Chief Complaint</th>
+							<th>Diagnosis</th>
+							<th>Treatment</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, e := range d.Encounters {
+							<tr>
+								<td>{ e.EncounterDate }</td>
+								<td>{ fmt.Sprint(e.UserID) }</td>
+								<td>{ e.ChiefComplaint }</td>
+								<td>{ e.Diagnosis }</td>
+								<td>{ e.Treatment }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			} else {
+				<p class="text-muted">No encounters recorded for this department.</p>
+			}
+		</div>
+	</div>
+
+	<div class="text-muted" style="font-size:0.75rem;margin-top:0.5rem;">
+		Unsaved form data is temporarily stored in your browser tab and cleared on logout or tab close.
+	</div>
+
+	<script>
+	document.addEventListener('DOMContentLoaded', function() {
+		restoreDraft('encounterForm');
+		restoreDraft('vitalsForm');
+	});
+	(function() {
+		var formDirty = false;
+		document.querySelectorAll('#encounterForm input, #encounterForm textarea, #vitalsForm input, #vitalsForm textarea').forEach(function(el) {
+			el.addEventListener('input', function() { formDirty = true; });
+		});
+		document.querySelectorAll('#encounterForm, #vitalsForm').forEach(function(form) {
+			form.addEventListener('submit', function() { formDirty = false; });
+		});
+		window.addEventListener('beforeunload', function(e) {
+			if (formDirty) {
+				e.preventDefault();
+				e.returnValue = 'You have unsaved changes. Are you sure you want to leave?';
+			}
+		});
+	})();
+	</script>
+}
+
+templ ClinicianPage(d ClinicianData) {
+	@Layout("Clinician Dashboard", d.User, ClinicianContent(d))
+}

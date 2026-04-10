@@ -10,6 +10,7 @@ import (
 
 	"campus-portal/internal/models"
 	"campus-portal/internal/services"
+	"campus-portal/internal/views"
 
 	"github.com/gin-gonic/gin"
 )
@@ -77,13 +78,33 @@ func (h *MenuHandler) MenuPage(c *gin.Context) {
 		})
 	}
 
-	c.HTML(http.StatusOK, "menu.html", gin.H{
-		"title":      "Dining Menu",
-		"user":       user,
-		"categories": categories,
-		"items":      enriched,
-		"activeCat":  catID,
-	})
+	md := views.MenuData{
+		User:      &views.UserInfo{FullName: user.FullName, Role: string(user.Role)},
+		ActiveCat: catID,
+	}
+	for _, cat := range categories {
+		md.Categories = append(md.Categories, views.CategoryOption{ID: cat.ID, Name: cat.Name})
+	}
+	for _, item := range enriched {
+		ei := views.EnrichedMenuItem{
+			ID:          item.ID,
+			SKU:         item.SKU,
+			Name:        item.Name,
+			Description: item.Description,
+			ItemType:    item.ItemType,
+			FinalPrice:  item.FinalPrice,
+			SoldOut:     item.MenuItem.SoldOut,
+			Available:   item.Available,
+		}
+		for _, ch := range item.Choices {
+			ei.Choices = append(ei.Choices, views.ChoiceInfo{Name: ch.Name, ChoiceType: ch.ChoiceType, ExtraPrice: ch.ExtraPrice})
+		}
+		for _, sub := range item.Substitutes {
+			ei.Substitutes = append(ei.Substitutes, views.SubstituteInfo{Name: sub.Name})
+		}
+		md.Items = append(md.Items, ei)
+	}
+	views.Render(c, http.StatusOK, views.MenuPage(md))
 }
 
 func (h *MenuHandler) MenuManagePage(c *gin.Context) {

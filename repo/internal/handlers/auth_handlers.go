@@ -111,11 +111,22 @@ func (h *AuthHandler) UsersPage(c *gin.Context) {
 	orgID := getOrgID(c)
 	var users []models.User
 	h.DB.Where("organization_id = ?", orgID).Find(&users)
-	c.HTML(http.StatusOK, "admin_users.html", gin.H{
-		"title": "User Management",
-		"users": users,
-		"user":  GetCurrentUser(c),
-	})
+	currentUser := GetCurrentUser(c)
+
+	ud := views.AdminUsersData{
+		User: &views.UserInfo{FullName: currentUser.FullName, Role: string(currentUser.Role)},
+	}
+	for _, u := range users {
+		ud.Users = append(ud.Users, views.AdminUserRow{
+			ID:       u.ID,
+			Username: u.Username,
+			FullName: u.FullName,
+			Email:    u.Email,
+			Role:     string(u.Role),
+			Active:   u.Active,
+		})
+	}
+	views.Render(c, http.StatusOK, views.AdminUsersPage(ud))
 }
 
 func (h *AuthHandler) ToggleUser(c *gin.Context) {
@@ -197,10 +208,10 @@ func (h *AuthHandler) GrantTempAccess(c *gin.Context) {
 }
 
 func (h *AuthHandler) RegisterPage(c *gin.Context) {
-	c.HTML(http.StatusOK, "register.html", gin.H{
-		"title": "Register New User",
-		"user":  GetCurrentUser(c),
-	})
+	currentUser := GetCurrentUser(c)
+	views.Render(c, http.StatusOK, views.RegisterPage(views.RegisterData{
+		User: &views.UserInfo{FullName: currentUser.FullName, Role: string(currentUser.Role)},
+	}))
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
@@ -212,29 +223,30 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	role := models.Role(c.PostForm("role"))
 
 	// Password validation
+	currentUser := GetCurrentUser(c)
+	userInfo := &views.UserInfo{FullName: currentUser.FullName, Role: string(currentUser.Role)}
 	if len(password) < 8 {
-		c.HTML(http.StatusOK, "register.html", gin.H{
-			"title": "Register New User", "error": "Password must be at least 8 characters", "user": GetCurrentUser(c),
-		})
+		views.Render(c, http.StatusOK, views.RegisterPage(views.RegisterData{
+			User: userInfo, ErrorMsg: "Password must be at least 8 characters",
+		}))
 		return
 	}
 	if password != passwordConfirm {
-		c.HTML(http.StatusOK, "register.html", gin.H{
-			"title": "Register New User", "error": "Passwords do not match", "user": GetCurrentUser(c),
-		})
+		views.Render(c, http.StatusOK, views.RegisterPage(views.RegisterData{
+			User: userInfo, ErrorMsg: "Passwords do not match",
+		}))
 		return
 	}
 
 	var deptID *uint
-	currentUser := GetCurrentUser(c)
 	if d, err := strconv.ParseUint(c.PostForm("department_id"), 10, 64); err == nil {
 		did := uint(d)
 		// Validate department belongs to the admin's organization
 		var dept models.DepartmentRecord
 		if err := h.DB.First(&dept, did).Error; err != nil || dept.OrganizationID != currentUser.OrganizationID {
-			c.HTML(http.StatusOK, "register.html", gin.H{
-				"title": "Register New User", "error": "Department does not belong to your organization", "user": currentUser,
-			})
+			views.Render(c, http.StatusOK, views.RegisterPage(views.RegisterData{
+				User: userInfo, ErrorMsg: "Department does not belong to your organization",
+			}))
 			return
 		}
 		deptID = &did
@@ -243,11 +255,9 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	// Derive org from the admin creating the user — not hardcoded
 	newUser, err := h.AuthSvc.Register(username, password, fullName, email, role, currentUser.OrganizationID, deptID)
 	if err != nil {
-		c.HTML(http.StatusOK, "register.html", gin.H{
-			"title": "Register New User",
-			"error": err.Error(),
-			"user":  GetCurrentUser(c),
-		})
+		views.Render(c, http.StatusOK, views.RegisterPage(views.RegisterData{
+			User: userInfo, ErrorMsg: err.Error(),
+		}))
 		return
 	}
 

@@ -217,6 +217,46 @@ func AutoMigrate(db *gorm.DB) {
 		END $$ LANGUAGE plpgsql;
 	`)
 
+	// Enforce audit immutability at DB level: prevent UPDATE and DELETE on audit tables.
+	// This ensures audit records cannot be tampered with even by application-level bugs.
+	db.Exec(`
+		CREATE OR REPLACE FUNCTION prevent_audit_modifications()
+		RETURNS TRIGGER AS $$
+		BEGIN
+			RAISE EXCEPTION 'Audit records are immutable — UPDATE and DELETE operations are not permitted on %', TG_TABLE_NAME;
+			RETURN NULL;
+		END;
+		$$ LANGUAGE plpgsql;
+	`)
+
+	// Protect audit_logs table
+	db.Exec(`
+		DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_trigger WHERE tgname = 'trg_audit_logs_immutable'
+			) THEN
+				CREATE TRIGGER trg_audit_logs_immutable
+				BEFORE UPDATE OR DELETE ON audit_logs
+				FOR EACH ROW EXECUTE FUNCTION prevent_audit_modifications();
+			END IF;
+		END $$;
+	`)
+
+	// Protect booking_audits table
+	db.Exec(`
+		DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_trigger WHERE tgname = 'trg_booking_audits_immutable'
+			) THEN
+				CREATE TRIGGER trg_booking_audits_immutable
+				BEFORE UPDATE OR DELETE ON booking_audits
+				FOR EACH ROW EXECUTE FUNCTION prevent_audit_modifications();
+			END IF;
+		END $$;
+	`)
+
 	log.Println("Database migration completed successfully")
 }
 

@@ -387,12 +387,20 @@ func (h *HealthHandler) ClinicianPage(c *gin.Context) {
 	orgID, _ := c.Get("orgID")
 	encounters, _ := h.HealthSvc.GetEncountersByDept(dept, orgID.(uint))
 
-	c.HTML(http.StatusOK, "clinician.html", gin.H{
-		"title":      "Clinician Dashboard",
-		"user":       user,
-		"encounters": encounters,
-		"activeDept": dept,
-	})
+	cd := views.ClinicianData{
+		User:       &views.UserInfo{FullName: user.FullName, Role: string(user.Role)},
+		ActiveDept: string(dept),
+	}
+	for _, e := range encounters {
+		cd.Encounters = append(cd.Encounters, views.ClinicianEncounterRow{
+			EncounterDate:  e.EncounterDate.Format("01/02/2006 03:04 PM"),
+			UserID:         e.UserID,
+			ChiefComplaint: e.ChiefComplaint,
+			Diagnosis:      e.Diagnosis,
+			Treatment:      e.Treatment,
+		})
+	}
+	views.Render(c, http.StatusOK, views.ClinicianPage(cd))
 }
 
 func (h *HealthHandler) CreateEncounter(c *gin.Context) {

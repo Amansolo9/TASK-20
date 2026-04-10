@@ -17,6 +17,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NOTE: Most page rendering has been migrated to Templ components (internal/views/*.templ).
+// The html/template setup below is retained only for the menu_manage page which still
+// uses legacy templates. Once menu_manage is also migrated, this can be removed entirely.
+
 func main() {
 	cfg := config.Load()
 
@@ -50,6 +54,14 @@ func main() {
 	csvWatcher := services.NewCSVWatcher(db, cfg.WatchedDir)
 	csvWatcher.Start()
 	defer csvWatcher.Stop()
+
+	// SSO sync (separate from CSV enrollment)
+	if cfg.SSOSyncEnabled && cfg.SSOSourcePath != "" {
+		ssoSource := &services.FileSSOSource{FilePath: cfg.SSOSourcePath}
+		ssoSync := services.NewSSOSyncService(db, ssoSource, auditSvc)
+		ssoSync.Start(cfg.SSOSyncInterval)
+		defer ssoSync.Stop()
+	}
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
@@ -201,8 +213,20 @@ func main() {
 				return
 			}
 			eventType, _ := payload["event_type"].(string)
+
+			// Validate against known event types
+			knownEvents := make(map[string]bool)
+			for _, et := range services.AllEventTypes() {
+				knownEvents[et] = true
+			}
+			if !knownEvents[eventType] {
+				log.Printf("Webhook received: unknown event_type=%s", eventType)
+				c.JSON(400, gin.H{"error": "unknown event type: " + eventType})
+				return
+			}
+
 			log.Printf("Webhook received: event_type=%s", eventType)
-			c.JSON(200, gin.H{"status": "received"})
+			c.JSON(200, gin.H{"status": "received", "event_type": eventType})
 		})
 	}
 

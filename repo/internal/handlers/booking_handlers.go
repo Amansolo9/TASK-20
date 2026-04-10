@@ -8,6 +8,7 @@ import (
 
 	"campus-portal/internal/models"
 	"campus-portal/internal/services"
+	"campus-portal/internal/views"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -52,14 +53,31 @@ func (h *BookingHandler) BookingPage(c *gin.Context) {
 	var styles []string
 	h.DB.Model(&models.TrainerProfile{}).Distinct("primary_style").Where("primary_style != ''").Pluck("primary_style", &styles)
 
-	c.HTML(http.StatusOK, "bookings.html", gin.H{
-		"title":    "Training Sessions",
-		"user":     user,
-		"bookings": bookings,
-		"venues":   venues,
-		"userMap":  userMap,
-		"styles":   styles,
-	})
+	bd := views.BookingsData{
+		User:    &views.UserInfo{FullName: user.FullName, Role: string(user.Role)},
+		UserMap: userMap,
+		Styles:  styles,
+		IsAdmin: false,
+	}
+	for _, v := range venues {
+		bd.Venues = append(bd.Venues, views.VenueOption{ID: v.ID, Name: v.Name, RoomType: v.RoomType, Capacity: v.Capacity})
+	}
+	for _, b := range bookings {
+		row := views.BookingRow{
+			ID:          b.ID,
+			SlotStart:   b.SlotStart.Format("01/02/2006 03:04 PM"),
+			SlotEnd:     b.SlotEnd.Format("03:04 PM"),
+			VenueID:     b.VenueID,
+			RequesterID: b.RequesterID,
+			PartnerID:   b.PartnerID,
+			Status:      string(b.Status),
+		}
+		if b.PartnerID != nil {
+			row.PartnerName = userMap[*b.PartnerID]
+		}
+		bd.Bookings = append(bd.Bookings, row)
+	}
+	views.Render(c, http.StatusOK, views.BookingsPage(bd))
 }
 
 func (h *BookingHandler) GetSlots(c *gin.Context) {
@@ -270,11 +288,28 @@ func (h *BookingHandler) AllBookingsPage(c *gin.Context) {
 		}
 	}
 
-	c.HTML(http.StatusOK, "bookings_admin.html", gin.H{
-		"title":    "All Training Sessions",
-		"user":     user,
-		"bookings": bookings,
-		"venues":   venues,
-		"userMap":  userMap,
-	})
+	bd := views.BookingsData{
+		User:    &views.UserInfo{FullName: user.FullName, Role: string(user.Role)},
+		UserMap: userMap,
+		IsAdmin: true,
+	}
+	for _, v := range venues {
+		bd.Venues = append(bd.Venues, views.VenueOption{ID: v.ID, Name: v.Name, RoomType: v.RoomType, Capacity: v.Capacity})
+	}
+	for _, b := range bookings {
+		row := views.BookingRow{
+			ID:          b.ID,
+			SlotStart:   b.SlotStart.Format("01/02/2006 03:04 PM"),
+			SlotEnd:     b.SlotEnd.Format("03:04 PM"),
+			VenueID:     b.VenueID,
+			RequesterID: b.RequesterID,
+			PartnerID:   b.PartnerID,
+			Status:      string(b.Status),
+		}
+		if b.PartnerID != nil {
+			row.PartnerName = userMap[*b.PartnerID]
+		}
+		bd.Bookings = append(bd.Bookings, row)
+	}
+	views.Render(c, http.StatusOK, views.BookingsPage(bd))
 }

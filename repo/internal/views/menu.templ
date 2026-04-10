@@ -1,0 +1,149 @@
+package views
+
+import "fmt"
+
+type CategoryOption struct {
+	ID   uint
+	Name string
+}
+
+type EnrichedMenuItem struct {
+	ID          uint
+	SKU         string
+	Name        string
+	Description string
+	ItemType    string
+	FinalPrice  float64
+	SoldOut     bool
+	Available   bool
+	Choices     []ChoiceInfo
+	Substitutes []SubstituteInfo
+}
+
+type ChoiceInfo struct {
+	Name       string
+	ChoiceType string
+	ExtraPrice float64
+}
+
+type SubstituteInfo struct {
+	Name string
+}
+
+type MenuData struct {
+	User       *UserInfo
+	Categories []CategoryOption
+	Items      []EnrichedMenuItem
+	ActiveCat  *uint
+}
+
+templ MenuContent(d MenuData) {
+	<div class="page-header">
+		<h2>Dining Menu</h2>
+	</div>
+
+	<!-- Category Navigation -->
+	<div class="category-nav">
+		<a href="/menu" class={ templ.KV("tab", true), templ.KV("active", d.ActiveCat == nil) }>All</a>
+		for _, cat := range d.Categories {
+			<a href={ templ.SafeURL(fmt.Sprintf("/menu?category_id=%d", cat.ID)) } class="tab">{ cat.Name }</a>
+		}
+	</div>
+
+	<!-- Order Form -->
+	<form method="POST" action="/menu/order" id="orderForm">
+		<div class="form-row mb-3">
+			<div class="form-group">
+				<label>Order Type</label>
+				<select name="order_type" id="orderType" onchange="recalculateAll()">
+					<option value="dine_in">Dine-In</option>
+					<option value="takeout">Takeout</option>
+				</select>
+			</div>
+			<div class="form-group">
+				<label>
+					<input type="checkbox" name="is_member" id="isMember" value="true" onchange="recalculateAll()"/>
+					Member Discount
+				</label>
+			</div>
+		</div>
+
+		<div class="menu-grid">
+			for _, item := range d.Items {
+				<div class={ templ.KV("menu-card", true), templ.KV("unavailable", !item.Available) }>
+					<div class="menu-card-header">
+						<h4>{ item.Name }</h4>
+						<span class="sku">SKU: { item.SKU }</span>
+						<span class="item-type badge">{ item.ItemType }</span>
+					</div>
+					<div class="menu-card-body">
+						if item.Description != "" {
+							<p>{ item.Description }</p>
+						}
+
+						<div class="price-info">
+							<span class="price">${ fmt.Sprintf("%.2f", item.FinalPrice) }</span>
+							if item.SoldOut {
+								<span class="badge badge-danger">Sold Out</span>
+							} else if !item.Available {
+								<span class="badge badge-warning">Outside sell window</span>
+							}
+						</div>
+
+						if len(item.Choices) > 0 {
+							<div class="choices">
+								<label>Options:</label>
+								for _, ch := range item.Choices {
+									<span class="choice-tag">{ ch.Name } ({ ch.ChoiceType }){ choiceExtra(ch.ExtraPrice) }</span>
+								}
+							</div>
+						}
+
+						if item.SoldOut && len(item.Substitutes) > 0 {
+							<div class="substitutes">
+								<label>Suggested alternatives:</label>
+								for _, sub := range item.Substitutes {
+									<span class="sub-tag">{ sub.Name }</span>
+								}
+							</div>
+						}
+
+						if item.Available {
+							<div class="order-controls">
+								<input type="hidden" name="item_id" value={ fmt.Sprint(item.ID) } disabled id={ fmt.Sprintf("item-%d", item.ID) }/>
+								<input type="number" name="quantity" value="1" min="1" max="10" disabled id={ fmt.Sprintf("qty-%d", item.ID) }/>
+								<button type="button" class="btn btn-sm btn-primary"
+									onclick={ templ.ComponentScript{Call: fmt.Sprintf("addToOrder(%d)", item.ID)} }>Add to Order</button>
+							</div>
+						}
+					</div>
+				</div>
+			}
+		</div>
+
+		<!-- Order Summary -->
+		<div class="card mt-4" id="orderSummary" style="display:none;">
+			<div class="card-header">
+				<h3>Order Summary</h3>
+			</div>
+			<div class="card-body">
+				<div id="orderItems"></div>
+				<div class="order-total">
+					<strong>Total: $<span id="orderTotal">0.00</span></strong>
+				</div>
+				<button type="submit" class="btn btn-primary btn-full mt-2">Submit Order</button>
+			</div>
+		</div>
+	</form>
+}
+
+func choiceExtra(price float64) string {
+	if price > 0 {
+		return fmt.Sprintf(" +$%.2f", price)
+	}
+	return ""
+}
+
+templ MenuPage(d MenuData) {
+	@Layout("Dining Menu", d.User, MenuContent(d))
+}

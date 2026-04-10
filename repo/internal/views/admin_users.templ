@@ -1,0 +1,188 @@
+package views
+
+import "fmt"
+
+type AdminUserRow struct {
+	ID       uint
+	Username string
+	FullName string
+	Email    string
+	Role     string
+	Active   bool
+}
+
+type AdminUsersData struct {
+	User  *UserInfo
+	Users []AdminUserRow
+}
+
+templ AdminUsersContent(d AdminUsersData) {
+	<div class="page-header">
+		<h2>User Management</h2>
+		<a href="/admin/register" class="btn btn-primary">Register New User</a>
+	</div>
+
+	<div class="card">
+		<div class="card-body">
+			<table class="table">
+				<thead>
+					<tr>
+						<th>ID</th>
+						<th>Username</th>
+						<th>Full Name</th>
+						<th>Email</th>
+						<th>Role</th>
+						<th>Status</th>
+						<th>Actions</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, u := range d.Users {
+						<tr>
+							<td>{ fmt.Sprint(u.ID) }</td>
+							<td>{ u.Username }</td>
+							<td>{ u.FullName }</td>
+							<td>{ u.Email }</td>
+							<td><span class={ fmt.Sprintf("role-badge role-%s", u.Role) }>{ u.Role }</span></td>
+							<td>
+								if u.Active {
+									<span class="badge badge-success">Active</span>
+								} else {
+									<span class="badge badge-danger">Inactive</span>
+								}
+							</td>
+							<td>
+								<!-- Toggle Active -->
+								<form method="POST" action={ templ.SafeURL(fmt.Sprintf("/admin/users/%d/toggle", u.ID)) } style="display:inline;">
+									if u.Active {
+										<input type="hidden" name="active" value="false"/>
+										<button type="submit" class="btn btn-sm btn-danger">Deactivate</button>
+									} else {
+										<input type="hidden" name="active" value="true"/>
+										<button type="submit" class="btn btn-sm btn-success">Activate</button>
+									}
+								</form>
+
+								<!-- Change Role -->
+								<form method="POST" action={ templ.SafeURL(fmt.Sprintf("/admin/users/%d/role", u.ID)) } style="display:inline;" class="inline-select">
+									<select name="role" onchange="this.form.submit()">
+										<option value="student" selected?={ u.Role == "student" }>Student</option>
+										<option value="faculty" selected?={ u.Role == "faculty" }>Faculty</option>
+										<option value="clinician" selected?={ u.Role == "clinician" }>Clinician</option>
+										<option value="staff" selected?={ u.Role == "staff" }>Staff</option>
+										<option value="admin" selected?={ u.Role == "admin" }>Admin</option>
+									</select>
+								</form>
+
+								<!-- Temp Access -->
+								<button class="btn btn-sm btn-outline" onclick={ templ.ComponentScript{Call: fmt.Sprintf("showTempAccess(%d)", u.ID)} }>Temp Access</button>
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		</div>
+	</div>
+
+	<!-- Temp Access Modal -->
+	<div id="tempAccessModal" class="modal" style="display:none;">
+		<div class="modal-content">
+			<div class="modal-header">
+				<h3>Grant Temporary Access</h3>
+				<button onclick="closeModal('tempAccessModal')" class="btn-close">&times;</button>
+			</div>
+			<div class="modal-body">
+				<form method="POST" id="tempAccessForm">
+					<div class="form-group">
+						<label>Elevated Role</label>
+						<select name="role">
+							<option value="clinician">Clinician</option>
+							<option value="staff">Staff</option>
+							<option value="admin">Admin</option>
+						</select>
+					</div>
+					<div class="form-group">
+						<label>Duration (hours)</label>
+						<input type="number" name="duration_hours" value="8" min="1" max="72"/>
+					</div>
+					<p class="text-muted">Access will automatically revert after the specified duration.</p>
+					<button type="submit" class="btn btn-primary">Grant Access</button>
+				</form>
+			</div>
+		</div>
+	</div>
+
+	<script>
+	function showTempAccess(userId) {
+		document.getElementById('tempAccessForm').action = '/admin/users/' + userId + '/temp-access';
+		document.getElementById('tempAccessModal').style.display = 'flex';
+	}
+	</script>
+}
+
+templ AdminUsersPage(d AdminUsersData) {
+	@Layout("User Management", d.User, AdminUsersContent(d))
+}
+
+type RegisterData struct {
+	User     *UserInfo
+	ErrorMsg string
+}
+
+templ RegisterContent(d RegisterData) {
+	<div class="page-header">
+		<h2>Register New User</h2>
+	</div>
+
+	<div class="card" style="max-width: 600px;">
+		<div class="card-body">
+			if d.ErrorMsg != "" {
+				<div class="alert alert-error">{ d.ErrorMsg }</div>
+			}
+			<form method="POST" action="/admin/register">
+				<div class="form-group">
+					<label>Username</label>
+					<input type="text" name="username" required/>
+				</div>
+				<div class="form-group">
+					<label>Password (min 8 characters)</label>
+					<input type="password" name="password" required minlength="8"/>
+				</div>
+				<div class="form-group">
+					<label>Confirm Password</label>
+					<input type="password" name="password_confirm" required minlength="8"/>
+				</div>
+				<div class="form-group">
+					<label>Full Name</label>
+					<input type="text" name="full_name" required/>
+				</div>
+				<div class="form-group">
+					<label>Email</label>
+					<input type="email" name="email"/>
+				</div>
+				<div class="form-group">
+					<label>Role</label>
+					<select name="role" required>
+						<option value="student">Student</option>
+						<option value="faculty">Faculty</option>
+						<option value="clinician">Clinician</option>
+						<option value="staff">Staff</option>
+						<option value="admin">Admin</option>
+					</select>
+				</div>
+				<div class="form-group">
+					<label>Department ID (optional)</label>
+					<input type="number" name="department_id"/>
+				</div>
+				<div class="btn-group">
+					<button type="submit" class="btn btn-primary">Register</button>
+					<a href="/admin/users" class="btn btn-outline">Cancel</a>
+				</div>
+			</form>
+		</div>
+	</div>
+}
+
+templ RegisterPage(d RegisterData) {
+	@Layout("Register New User", d.User, RegisterContent(d))
+}

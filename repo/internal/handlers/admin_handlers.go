@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"campus-portal/internal/services"
+	"campus-portal/internal/views"
 
 	"github.com/gin-gonic/gin"
 )
@@ -33,14 +34,21 @@ func (h *AdminHandler) PerformancePage(c *gin.Context) {
 	menuSell, _ := h.ReportingSvc.GetMenuSellThrough(orgID)
 	slowQueries, _ := h.ReportingSvc.GetSlowQueries(50)
 
-	c.HTML(http.StatusOK, "admin_performance.html", gin.H{
-		"title":        "Performance Dashboard",
-		"user":         user,
-		"clinicUtil":   clinicUtil,
-		"bookingRates": bookingRates,
-		"menuSell":     menuSell,
-		"slowQueries":  slowQueries,
-	})
+	pd := views.PerformanceData{
+		User:         &views.UserInfo{FullName: user.FullName, Role: string(user.Role)},
+		ClinicUtil:   clinicUtil,
+		BookingRates: bookingRates,
+		MenuSell:     menuSell,
+	}
+	for _, sq := range slowQueries {
+		pd.SlowQueries = append(pd.SlowQueries, views.SlowQueryRow{
+			CreatedAt: sq.CreatedAt.Format("01/02/2006 03:04 PM"),
+			Duration:  sq.Duration,
+			Query:     sq.Query,
+			Caller:    sq.Caller,
+		})
+	}
+	views.Render(c, http.StatusOK, views.PerformancePage(pd))
 }
 
 func (h *AdminHandler) WebhooksPage(c *gin.Context) {
@@ -48,11 +56,18 @@ func (h *AdminHandler) WebhooksPage(c *gin.Context) {
 	orgID := getCallerOrgID(c)
 	endpoints, _ := h.WebhookSvc.GetEndpoints(orgID)
 
-	c.HTML(http.StatusOK, "admin_webhooks.html", gin.H{
-		"title":     "Webhook Management",
-		"user":      user,
-		"endpoints": endpoints,
-	})
+	wd := views.WebhooksData{
+		User: &views.UserInfo{FullName: user.FullName, Role: string(user.Role)},
+	}
+	for _, ep := range endpoints {
+		wd.Endpoints = append(wd.Endpoints, views.WebhookEndpointRow{
+			ID:        ep.ID,
+			URL:       ep.URL,
+			EventType: ep.EventType,
+			Active:    ep.Active,
+		})
+	}
+	views.Render(c, http.StatusOK, views.WebhooksPage(wd))
 }
 
 func (h *AdminHandler) RegisterWebhook(c *gin.Context) {

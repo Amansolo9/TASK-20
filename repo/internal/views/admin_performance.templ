@@ -1,0 +1,131 @@
+package views
+
+import "fmt"
+
+type SlowQueryRow struct {
+	CreatedAt  string
+	Duration   int64
+	Query      string
+	Caller     string
+}
+
+type PerformanceData struct {
+	User         *UserInfo
+	ClinicUtil   []map[string]interface{}
+	BookingRates []map[string]interface{}
+	MenuSell     []map[string]interface{}
+	SlowQueries  []SlowQueryRow
+}
+
+templ PerformanceContent(d PerformanceData) {
+	<div class="page-header">
+		<h2>Performance Dashboard</h2>
+		<form method="POST" action="/admin/refresh-views" style="display:inline;">
+			<button type="submit" class="btn btn-outline">Refresh Materialized Views</button>
+		</form>
+	</div>
+
+	<div class="grid grid-3">
+		<!-- Clinic Utilization -->
+		<div class="card">
+			<div class="card-header"><h3>Clinic Utilization</h3></div>
+			<div class="card-body">
+				if len(d.ClinicUtil) > 0 {
+					<table class="table table-sm">
+						<thead><tr><th>Day</th><th>Department</th><th>Encounters</th></tr></thead>
+						<tbody>
+							for _, row := range d.ClinicUtil {
+								<tr>
+									<td>{ fmt.Sprint(row["day"]) }</td>
+									<td>{ fmt.Sprint(row["department"]) }</td>
+									<td>{ fmt.Sprint(row["encounter_count"]) }</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				} else {
+					<p class="text-muted">No data available yet.</p>
+				}
+			</div>
+		</div>
+
+		<!-- Booking Fill Rates -->
+		<div class="card">
+			<div class="card-header"><h3>Booking Fill Rates</h3></div>
+			<div class="card-body">
+				if len(d.BookingRates) > 0 {
+					<table class="table table-sm">
+						<thead><tr><th>Day</th><th>Venue</th><th>Total</th><th>Confirmed</th><th>Canceled</th></tr></thead>
+						<tbody>
+							for _, row := range d.BookingRates {
+								<tr>
+									<td>{ fmt.Sprint(row["day"]) }</td>
+									<td>{ fmt.Sprint(row["venue_id"]) }</td>
+									<td>{ fmt.Sprint(row["total_bookings"]) }</td>
+									<td>{ fmt.Sprint(row["confirmed"]) }</td>
+									<td>{ fmt.Sprint(row["canceled"]) }</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				} else {
+					<p class="text-muted">No data available yet.</p>
+				}
+			</div>
+		</div>
+
+		<!-- Menu Sell-Through -->
+		<div class="card">
+			<div class="card-header"><h3>Menu Sell-Through</h3></div>
+			<div class="card-body">
+				if len(d.MenuSell) > 0 {
+					<table class="table table-sm">
+						<thead><tr><th>SKU</th><th>Name</th><th>Sold</th><th>Revenue</th></tr></thead>
+						<tbody>
+							for _, row := range d.MenuSell {
+								<tr>
+									<td>{ fmt.Sprint(row["sku"]) }</td>
+									<td>{ fmt.Sprint(row["name"]) }</td>
+									<td>{ fmt.Sprint(row["total_sold"]) }</td>
+									<td>${ fmt.Sprint(row["total_revenue"]) }</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				} else {
+					<p class="text-muted">No data available yet.</p>
+				}
+			</div>
+		</div>
+	</div>
+
+	<!-- Slow Queries -->
+	<div class="card mt-4">
+		<div class="card-header"><h3>Slow Queries (&gt;500ms)</h3></div>
+		<div class="card-body">
+			if len(d.SlowQueries) > 0 {
+				<table class="table">
+					<thead>
+						<tr><th>Time</th><th>Duration (ms)</th><th>Query</th><th>Caller</th></tr>
+					</thead>
+					<tbody>
+						for _, q := range d.SlowQueries {
+							<tr>
+								<td>{ q.CreatedAt }</td>
+								<td><span class="badge badge-danger">{ fmt.Sprintf("%dms", q.Duration) }</span></td>
+								<td><code class="query-text">{ q.Query }</code></td>
+								<td>{ q.Caller }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			} else {
+				<p class="text-muted">No slow queries recorded. Great performance!</p>
+			}
+		</div>
+	</div>
+}
+
+templ PerformancePage(d PerformanceData) {
+	@Layout("Performance Dashboard", d.User, PerformanceContent(d))
+}

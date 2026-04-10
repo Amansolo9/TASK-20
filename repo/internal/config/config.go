@@ -32,6 +32,10 @@ type Config struct {
 
 	MVRefreshInterval time.Duration
 	SecureCookies     bool
+
+	SSOSyncEnabled  bool
+	SSOSyncInterval time.Duration
+	SSOSourcePath   string
 }
 
 func Load() *Config {
@@ -57,6 +61,17 @@ func Load() *Config {
 		SlowQueryMs:       500,
 		CacheTTL:          5 * time.Minute,
 		MVRefreshInterval: 15 * time.Minute,
+		SSOSyncEnabled:  os.Getenv("SSO_SYNC_ENABLED") == "true",
+		SSOSyncInterval: func() time.Duration {
+			if v := os.Getenv("SSO_SYNC_INTERVAL"); v != "" {
+				if d, err := time.ParseDuration(v); err == nil {
+					return d
+				}
+			}
+			return 15 * time.Minute
+		}(),
+		SSOSourcePath: getEnv("SSO_SOURCE_PATH", ""),
+
 		// Default secure cookies to true in release mode, false in dev
 		SecureCookies: func() bool {
 			explicit := os.Getenv("SECURE_COOKIES")
