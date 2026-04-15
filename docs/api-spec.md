@@ -123,7 +123,7 @@ All require Bearer token + valid HMAC + admin role. All responses are org-scoped
 | `GET` | `/api/internal/clinic-utilization` | Clinic report (from materialized view, org-filtered) |
 | `GET` | `/api/internal/booking-fill-rates` | Booking report (from materialized view, org-filtered) |
 | `GET` | `/api/internal/menu-sell-through` | Menu report (from materialized view, org-filtered) |
-| `POST` | `/api/internal/webhooks/receive` | Inbound webhook receiver |
+| `POST` | `/api/internal/webhooks/receive` | Inbound webhook receiver (validates against known event types) |
 
 ---
 
@@ -157,7 +157,18 @@ Outbound webhook payloads are JSON, signed with HMAC-SHA256.
 - `X-Webhook-Signature: <HMAC-SHA256 hex>`
 - `X-Webhook-Event: <event_type>`
 
-**Event types:** `booking.created`, `booking.confirmed`, `booking.canceled`, `booking.refunded`
+**Event types:**
+
+| Category | Events |
+|----------|--------|
+| Bookings | `booking.created`, `booking.confirmed`, `booking.canceled` |
+| Encounters | `encounter.created` |
+| Users | `user.created` |
+| Orders | `order.created` |
+| E-Signature | `esignature.request` |
+| Plagiarism | `plagiarism.check` |
+| Competition Platform | `competition.result`, `competition.registration`, `competition.score_update` |
+| Data Warehouse | `warehouse.export_ready`, `warehouse.sync_complete`, `warehouse.schema_change` |
 
 **Delivery behavior:**
 - Up to 3 attempts with exponential backoff (1s, 2s, 3s)
@@ -185,3 +196,42 @@ Every mutable operation produces an immutable audit entry:
 ```
 
 **Reason enforcement:** Health record updates, vitals recordings, and booking state transitions require a non-empty human-readable reason/note. Empty or whitespace-only reasons are rejected with 400.
+
+**Immutability:** Audit log entries are protected by PostgreSQL triggers (`trg_audit_logs_immutable`, `trg_booking_audits_immutable`) that raise an exception on any UPDATE or DELETE attempt. This ensures audit records cannot be tampered with even via direct SQL access through the application's database connection.
+
+---
+
+## SSO Sync
+
+The portal supports periodic synchronization from an on-prem SSO directory, separate from CSV enrollment imports.
+
+**Configuration (environment variables):**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SSO_SYNC_ENABLED` | Enable SSO sync service | `false` |
+| `SSO_SYNC_INTERVAL` | Sync interval (Go duration) | `15m` |
+| `SSO_SOURCE_PATH` | Path to SSO JSON file on shared network | (required if enabled) |
+
+**SSO JSON format:**
+```json
+[
+  {
+    "username": "jdoe",
+    "full_name": "Jane Doe",
+    "email": "jdoe@campus.local",
+    "role": "student",
+    "department": "General Medicine",
+    "groups": ["athletics"],
+    "active": true,
+    "organization": "Campus University"
+  }
+]
+```
+
+**Behavior:**
+- Creates new users with placeholder password (requires admin reset or SSO login)
+- Updates name, email, role, department for existing users
+- Deactivates users marked `active: false`
+- Auto-creates departments referenced in SSO data
+- All changes logged via audit service with `sso_sync_created` / `sso_sync_updated` actions

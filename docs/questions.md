@@ -249,3 +249,67 @@
 **My Understanding:** Deactivating an account should immediately invalidate all active sessions for that user, forcing them out of the system. This prevents a deactivated user from continuing to use an existing session.
 
 **Solution:** Implemented `ToggleUserActive` in `auth.go` which flips the user's `Active` boolean, paired with `InvalidateUserSessions` which deletes all session records for that user from the `sessions` table. The `ToggleUser` handler in `auth_handlers.go` calls both methods in sequence and creates an audit log entry. Additionally, `ValidateSession` checks the user's `Active` status on every request, so even if a session record somehow persists, the authentication middleware will reject the request.
+
+---
+
+## 26. Templ Migration for Server-Rendered Pages
+
+**Question:** The codebase uses both Go `html/template` and Templ components for rendering pages. Should all core pages be migrated to Templ for consistency, or is a hybrid approach acceptable?
+
+**My Understanding:** All core pages should use Templ components for type safety, compile-time checks, and consistency with the dashboard (which already uses Templ). The `html/template` approach with `gin.H` maps loses type safety and can lead to runtime template errors.
+
+**Solution:** Migrated all core pages to Templ components in `internal/views/`:
+- `bookings.templ` — unified booking page (user + admin views via `IsAdmin` flag)
+- `menu.templ` — dining menu with category nav, items, order form
+- `clinician.templ` — clinician dashboard with encounter/vitals forms and draft persistence
+- `admin_users.templ` — user management table + registration form (with `RegisterPage`)
+- `admin_performance.templ` — performance dashboard with materialized view data
+- `admin_webhooks.templ` — webhook management with updated event type options
+
+Each handler constructs a typed data struct (e.g., `views.BookingsData`, `views.MenuData`) and calls `views.Render()`. This replaces `c.HTML()` with `gin.H` maps, providing compile-time guarantees that all template data is correctly typed and populated. The legacy `html/template` bootstrapping in `main.go` is retained only for `menu_manage.html`.
+
+---
+
+## 27. On-Prem SSO Sync vs. CSV Enrollment
+
+**Question:** The prompt mentions "scheduled imports from on-prem SSO" alongside "academic enrollment exports (CSV dropped into a watched folder)" but does not clarify whether these are the same mechanism or separate integration paths.
+
+**My Understanding:** These are separate systems. CSV enrollment handles batch imports from academic systems (registrar, HR), while SSO sync handles real-time user provisioning from the campus identity provider. They should be independent services with distinct configuration.
+
+**Solution:** Implemented `SSOSyncService` in `internal/services/sso_sync.go` as a separate service from the `CSVWatcher`:
+- Defines `SSOSource` interface for pluggable SSO backends (file-based `FileSSOSource` included)
+- Runs on a configurable interval (default 15 min) via background goroutine
+- Syncs user create/update/deactivate with full audit logging (`sso_sync_created`, `sso_sync_updated` actions)
+- Auto-creates departments from SSO data when they don't exist in the portal
+- Configured via `SSO_SYNC_ENABLED`, `SSO_SYNC_INTERVAL`, `SSO_SOURCE_PATH` environment variables
+- Started in `main.go` alongside (not replacing) the CSV watcher
+
+---
+
+## 28. Audit Immutability Enforcement
+
+**Question:** The prompt requires "immutable revisions" for audit records, but does not specify whether immutability should be enforced at the application level (no delete/update code paths) or at the database level (triggers/constraints).
+
+**My Understanding:** Application-level enforcement alone is insufficient — bugs, ORM misuse, or raw SQL could bypass it. Database-level enforcement via triggers provides a defense-in-depth guarantee that audit records cannot be modified regardless of how the database is accessed.
+
+**Solution:** Implemented PostgreSQL triggers in `internal/models/database.go` during `AutoMigrate`:
+- `prevent_audit_modifications()` — trigger function that raises an exception with the table name on any UPDATE or DELETE attempt
+- `trg_audit_logs_immutable` — BEFORE UPDATE OR DELETE trigger on `audit_logs`
+- `trg_booking_audits_immutable` — BEFORE UPDATE OR DELETE trigger on `booking_audits`
+- Both triggers use `IF NOT EXISTS` checks for idempotent migration
+- Test cleanup disables triggers temporarily (`ALTER TABLE ... DISABLE TRIGGER`) before re-enabling
+
+---
+
+## 29. Named Integration Contracts for External Systems
+
+**Question:** The prompt references integration with "competition platforms" and "data warehouse" systems, but the webhook plumbing only supports generic string event types with no structured payload contracts.
+
+**My Understanding:** Named integration systems should have explicit event type constants, typed payload schemas, and typed dispatcher helpers to ensure payload structure correctness and make the integration contracts self-documenting.
+
+**Solution:** Implemented `internal/services/integration_contracts.go` with:
+- Event type constants for all systems: `EventCompetitionResult`, `EventWarehouseExportReady`, etc.
+- Typed payload structs: `CompetitionResultPayload`, `CompetitionRegistrationPayload`, `CompetitionScoreUpdatePayload`, `WarehouseExportReadyPayload`, `WarehouseSyncCompletePayload`, `WarehouseSchemaChangePayload`
+- Typed dispatcher methods on `WebhookService`: `DispatchCompetitionResult(...)`, `DispatchWarehouseExportReady(...)`, etc. — these set the event type and call `DispatchForOrg` with the correct payload
+- `AllEventTypes()` registry for validation — the internal webhook receiver rejects unknown event types
+- Updated admin webhooks UI (`admin_webhooks.templ`) to include competition and warehouse event options in the registration dropdown

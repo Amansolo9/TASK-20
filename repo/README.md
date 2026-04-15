@@ -45,7 +45,7 @@ The system is designed for **fully offline/internal network** deployment with no
 |------------|-----------------------------------|
 | Language   | Go 1.21+                          |
 | Web Server | Gin                               |
-| Frontend   | Templ + Go html/template + vanilla JS/CSS |
+| Frontend   | Templ components (type-safe server-rendered HTML) + vanilla JS/CSS |
 | Database   | PostgreSQL 16                     |
 | Auth       | bcrypt + session cookies + locally-issued API tokens |
 | Container  | Docker / Docker Compose           |
@@ -88,7 +88,21 @@ bash run_tests.sh
 
 # Run only unit tests (no database required)
 bash run_tests.sh --unit
+
+# Run only API/integration tests (requires PostgreSQL)
+bash run_tests.sh --api
+
+# Full suite with coverage report
+bash run_tests.sh --coverage
+
+# Self-contained: starts DB in Docker, runs all tests, stops DB
+bash run_tests.sh --docker
 ```
+
+**Test suite (157 test functions):**
+- **Unit tests** — middleware security, crypto, config, PII masking (no DB)
+- **API/integration tests** — auth, handlers, booking, menu, webhook, health, audit, SSO sync, CSV watcher, integration contracts (requires DB)
+- **End-to-end tests** — full login→dashboard→booking→logout flows, cross-tenant isolation with strong negative assertions
 
 ### Local Development (without Docker)
 
@@ -110,7 +124,18 @@ bash run_tests.sh --unit
 
 ### Templ Integration
 
-The project uses the `a-h/templ` library for component-based server-rendered HTML as specified by the prompt. Templ components are in `internal/views/*.templ` and compiled to Go code via the `templ` CLI during the Docker build. The login page and layout are Templ-rendered. Remaining pages use Go's `html/template` with the Templ rendering infrastructure (`views.Render()`) available for all handlers.
+The project uses the `a-h/templ` library for type-safe, component-based server-rendered HTML. All core pages are rendered via Templ components in `internal/views/*.templ`, compiled to Go code via the `templ` CLI during the Docker build. Each handler constructs a typed data struct and calls `views.Render()` — no `gin.H` map-based rendering for migrated pages. The only remaining `html/template` page is `menu_manage.html`.
+
+| Page | Templ File |
+|------|-----------|
+| Dashboard | `dashboard.templ` |
+| Bookings (user + admin) | `bookings.templ` |
+| Dining Menu | `menu.templ` |
+| Clinician | `clinician.templ` |
+| Admin Users + Register | `admin_users.templ` |
+| Performance Dashboard | `admin_performance.templ` |
+| Webhooks | `admin_webhooks.templ` |
+| Login / Error / Layout | `layout.templ` |
 
 ---
 
@@ -158,6 +183,9 @@ Task-20/
 │   │   ├── booking.go               # Slot engine, partner matching, conflict detection
 │   │   ├── health.go                # Health records, vitals, encounters, file storage
 │   │   ├── integration.go           # CSV watcher, webhooks, reporting, PII masking
+│   │   ├── integration_contracts.go # Named event types, typed payloads, typed dispatchers
+│   │   ├── sso_sync.go             # On-prem SSO sync service (separate from CSV)
+│   │   ├── crypto.go               # AES-256-GCM field encryption
 │   │   └── menu.go                  # Categories, items, pricing engine, sell windows
 │   └── templates/
 │       ├── funcs.go                 # Custom template functions (divf, deref)
@@ -185,10 +213,16 @@ Task-20/
 │   └── 01-extensions.sql            # Postgres init script (pgcrypto extension)
 ├── uploads/                         # Runtime: uploaded documents stored here
 ├── watched_folder/                  # Runtime: CSV drop folder for enrollment imports
-├── internal/
 │   └── views/
-│       ├── layout.templ             # Templ components (login page, layout)
-│       ├── layout_templ.go          # Generated Go code from Templ
+│       ├── layout.templ             # Base layout, login page, error page
+│       ├── dashboard.templ          # Health dashboard
+│       ├── bookings.templ           # Booking pages (user + admin)
+│       ├── menu.templ               # Dining menu
+│       ├── clinician.templ          # Clinician dashboard
+│       ├── admin_users.templ        # User management + registration
+│       ├── admin_performance.templ  # Performance dashboard
+│       ├── admin_webhooks.templ     # Webhook management
+│       ├── *_templ.go               # Generated Go code from Templ
 │       └── render.go                # Templ-to-Gin rendering bridge
 ├── Dockerfile                       # Multi-stage Go 1.21+ build with Templ generation
 ├── docker-compose.yml               # Postgres + App orchestration (zero-config)
@@ -234,7 +268,8 @@ Task-20/
                      │  ├─ AuditService    (immutable revisions)    │
                      │  ├─ WebhookService  (dispatch + delivery)    │
                      │  ├─ ReportingService(mat views, cache)       │
-                     │  └─ CSVWatcher      (folder polling)         │
+                     │  ├─ CSVWatcher      (folder polling)         │
+                     │  └─ SSOSyncService  (on-prem SSO sync)      │
                      └──────────────┬───────────────────────────────┘
                                     │
                      ┌──────────────▼───────────────────────────────┐
@@ -248,6 +283,7 @@ Task-20/
 - Temp access revert ticker (every 1 minute)
 - Materialized view refresh ticker (every 15 minutes)
 - CSV watched folder poller (every 10 seconds)
+- SSO sync service (every 15 minutes, when `SSO_SYNC_ENABLED=true`)
 
 ---
 
@@ -258,7 +294,7 @@ Task-20/
 | Feature | Status | Details |
 |---------|--------|---------|
 | Go project with Gin web server | Done | `cmd/server/main.go` |
-| HTML templates for component-based UI | Done | 14 templates in `internal/templates/` |
+| Templ components for type-safe UI | Done | 8 Templ components in `internal/views/` + 1 legacy template in `internal/templates/` |
 | GORM for PostgreSQL ORM | Done | 27 model structs in `internal/models/models.go` |
 | Manual dependency injection | Done | All services wired in `main.go` |
 | Session-based login (local credentials) | Done | bcrypt hashing, 24h session cookie |
@@ -327,10 +363,12 @@ Task-20/
 |---------|--------|---------|
 | CSV watched folder importer | Done | Polls `/app/watched_folder/` every 10s, processes enrollment + org CSVs. Imported users get a placeholder password and require admin password reset before first login. Roles are validated against the allowed set (student/faculty/clinician/staff/admin). |
 | Processed/error file handling | Done | Moves CSVs to `processed/` or `errors/` subdirectories |
+| On-prem SSO sync service | Done | Separate from CSV. `SSOSyncService` syncs users/groups from JSON file on shared network path. Configurable interval (default 15 min). Auto-creates departments. Full audit trail. Enabled via `SSO_SYNC_ENABLED=true`. |
 | Webhook endpoint registration | Done | URL + event type + HMAC secret per endpoint |
 | Webhook outbound delivery | Done | HMAC-signed POST with 3 retries + exponential backoff |
 | Webhook delivery logging | Done | Status code, response, attempt count tracked |
-| Webhook receiver endpoint | Done | `POST /webhooks/receive` for inbound events |
+| Webhook receiver endpoint | Done | `POST /webhooks/receive` validates against known event types |
+| Named integration contracts | Done | Typed event constants + payload schemas for competition platform (`competition.result`, `competition.registration`, `competition.score_update`) and data warehouse (`warehouse.export_ready`, `warehouse.sync_complete`, `warehouse.schema_change`). Typed dispatcher helpers on `WebhookService`. |
 | Materialized views (3 reports) | Done | Clinic utilization, booking fill rates, menu sell-through |
 | MV scheduled refresh | Done | Background ticker every 15 minutes |
 | Result caching with 5-min TTL | Done | In-memory cache in ReportingService |
@@ -472,7 +510,7 @@ Requires Bearer token, valid HMAC signature, AND admin role. All responses are o
 | GET | `/api/internal/clinic-utilization` | Clinic report data (from `mv_clinic_utilization`, org-scoped) |
 | GET | `/api/internal/booking-fill-rates` | Booking report data (from `mv_booking_fill_rates`, org-scoped) |
 | GET | `/api/internal/menu-sell-through` | Menu report data (from `mv_menu_sell_through`, org-scoped) |
-| POST | `/api/internal/webhooks/receive` | Inbound webhook receiver |
+| POST | `/api/internal/webhooks/receive` | Inbound webhook receiver (validates against known event types) |
 
 ---
 
@@ -509,7 +547,7 @@ The system uses two auth methods:
 | CSRF protection | Per-session token validated on all state-changing POST requests |
 | File upload validation | Server-side: 10MB max, allowlisted MIME types only, scope-checked |
 | File integrity | SHA-256 fingerprint stored for every uploaded file |
-| Audit trail | Immutable log with SHA-256 fingerprint per revision, scope-enforced |
+| Audit trail | Immutable log with SHA-256 fingerprint per revision, scope-enforced. DB-level triggers (`trg_audit_logs_immutable`, `trg_booking_audits_immutable`) block UPDATE/DELETE on audit tables. |
 | At-rest encryption | AES-256-GCM for SSN, health record fields (allergies, conditions, medications) |
 | PII masking | SSN: `***-**-1234`; Email: `ja***@domain` (role-based display) |
 | Secret management | SESSION_KEY, HMAC_SECRET auto-generated with warnings if not set; FIELD_ENCRYPTION_KEY uses deterministic dev fallback in debug mode, **required** in production |
@@ -545,6 +583,9 @@ All settings are configured via environment variables. Everything has sensible d
 | `SECURE_COOKIES` | `false` | Set `true` when serving behind TLS |
 | `UPLOAD_DIR` | `./uploads` | File upload storage path |
 | `WATCHED_DIR` | `./watched_folder` | CSV import watch path |
+| `SSO_SYNC_ENABLED` | `false` | Enable on-prem SSO sync service |
+| `SSO_SYNC_INTERVAL` | `15m` | SSO sync interval (Go duration format) |
+| `SSO_SOURCE_PATH` | (none) | Path to SSO JSON file on shared network |
 | `GIN_MODE` | `debug` | Gin framework mode (`debug` for development, `release` for production) |
 
 **Production deployment:** All default credentials (`campus_admin`/`campus_secret`, seed password `password123`) must be changed. Generate secrets with `openssl rand -base64 32` for `FIELD_ENCRYPTION_KEY` and `openssl rand -hex 32` for `SESSION_KEY`/`HMAC_SECRET`. Pass them as environment variables or via a `.env` file.
