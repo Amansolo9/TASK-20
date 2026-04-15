@@ -66,6 +66,7 @@ func getTestDB(t *testing.T) *gorm.DB {
 }
 
 // cleanupTestData removes test data created during tests.
+// Audit tables may have immutability triggers; we temporarily disable them for cleanup.
 func cleanupTestData(db *gorm.DB) {
 	db.Exec("DELETE FROM booking_audits")
 	db.Exec("DELETE FROM bookings")
@@ -79,7 +80,13 @@ func cleanupTestData(db *gorm.DB) {
 	db.Exec("DELETE FROM menu_item_choices")
 	db.Exec("DELETE FROM menu_items")
 	db.Exec("DELETE FROM menu_categories")
+	// Disable immutability triggers for test cleanup, then re-enable
+	db.Exec("ALTER TABLE audit_logs DISABLE TRIGGER trg_audit_logs_immutable")
 	db.Exec("DELETE FROM audit_logs")
+	db.Exec("ALTER TABLE audit_logs ENABLE TRIGGER trg_audit_logs_immutable")
+	db.Exec("ALTER TABLE booking_audits DISABLE TRIGGER trg_booking_audits_immutable")
+	db.Exec("DELETE FROM booking_audits")
+	db.Exec("ALTER TABLE booking_audits ENABLE TRIGGER trg_booking_audits_immutable")
 	db.Exec("DELETE FROM temp_accesses")
 	db.Exec("DELETE FROM sessions")
 	db.Exec("DELETE FROM webhook_deliveries")
