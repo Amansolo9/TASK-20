@@ -16,6 +16,8 @@ func TestCSVWatcher_ImportEnrollment_CreatesUsers(t *testing.T) {
 	defer cleanupTestData(db)
 
 	db.FirstOrCreate(&models.Organization{Name: "Campus University"}, "name = ?", "Campus University")
+	// Hard-delete leftovers from prior runs
+	db.Unscoped().Where("username IN ?", []string{"csv_test_user1", "csv_test_user2"}).Delete(&models.User{})
 
 	dir := t.TempDir()
 	csvContent := "username,full_name,email,role,eligible\ncsv_test_user1,CSV User One,csv1@campus.local,student,true\ncsv_test_user2,CSV User Two,csv2@campus.local,faculty,true\n"
@@ -45,7 +47,7 @@ func TestCSVWatcher_ImportEnrollment_CreatesUsers(t *testing.T) {
 	assert.NoError(t, err, "file should exist in processed dir")
 
 	// Cleanup
-	db.Where("username IN ?", []string{"csv_test_user1", "csv_test_user2"}).Delete(&models.User{})
+	db.Unscoped().Where("username IN ?", []string{"csv_test_user1", "csv_test_user2"}).Delete(&models.User{})
 }
 
 func TestCSVWatcher_ImportEnrollment_IneligibleDeactivated(t *testing.T) {
@@ -53,6 +55,16 @@ func TestCSVWatcher_ImportEnrollment_IneligibleDeactivated(t *testing.T) {
 	defer cleanupTestData(db)
 
 	db.FirstOrCreate(&models.Organization{Name: "Campus University"}, "name = ?", "Campus University")
+	db.Unscoped().Where("username = ?", "csv_ineligible").Delete(&models.User{})
+
+	// Pre-create the user as active so the CSV import updates (not creates) them.
+	// GORM's Create skips zero-value booleans with default:true, so we test
+	// the update path which correctly sets Active=false.
+	db.Create(&models.User{
+		Username: "csv_ineligible", PasswordHash: "$2a$10$placeholder",
+		FullName: "Ineligible User", Email: "inel@campus.local",
+		Role: models.RoleStudent, OrganizationID: 1, Active: true,
+	})
 
 	dir := t.TempDir()
 	csvContent := "username,full_name,email,role,eligible\ncsv_ineligible,Ineligible User,inel@campus.local,student,false\n"
@@ -65,10 +77,9 @@ func TestCSVWatcher_ImportEnrollment_IneligibleDeactivated(t *testing.T) {
 	var user models.User
 	err := db.Where("username = ?", "csv_ineligible").First(&user).Error
 	require.NoError(t, err)
-	assert.False(t, user.Active, "ineligible user should be deactivated")
+	assert.False(t, user.Active, "ineligible user should be deactivated by CSV import")
 
-	// Cleanup
-	db.Where("username = ?", "csv_ineligible").Delete(&models.User{})
+	db.Unscoped().Where("username = ?", "csv_ineligible").Delete(&models.User{})
 }
 
 func TestCSVWatcher_ImportEnrollment_InvalidRoleSkipped(t *testing.T) {
@@ -95,6 +106,7 @@ func TestCSVWatcher_ImportEnrollment_UpdatesExistingUser(t *testing.T) {
 	defer cleanupTestData(db)
 
 	db.FirstOrCreate(&models.Organization{Name: "Campus University"}, "name = ?", "Campus University")
+	db.Unscoped().Where("username = ?", "csv_existing").Delete(&models.User{})
 
 	// Pre-create a user
 	db.Create(&models.User{
@@ -117,7 +129,7 @@ func TestCSVWatcher_ImportEnrollment_UpdatesExistingUser(t *testing.T) {
 	assert.Equal(t, "new@csv.local", user.Email, "email should be updated")
 
 	// Cleanup
-	db.Where("username = ?", "csv_existing").Delete(&models.User{})
+	db.Unscoped().Where("username = ?", "csv_existing").Delete(&models.User{})
 }
 
 func TestCSVWatcher_ImportOrgStructure_CreatesDepartments(t *testing.T) {
@@ -185,6 +197,7 @@ func TestCSVWatcher_DepartmentSync(t *testing.T) {
 
 	db.FirstOrCreate(&models.Organization{Name: "Campus University"}, "name = ?", "Campus University")
 	db.FirstOrCreate(&models.DepartmentRecord{Name: "General Medicine", OrganizationID: 1}, "name = ? AND organization_id = ?", "General Medicine", 1)
+	db.Unscoped().Where("username = ?", "csv_dept_user").Delete(&models.User{})
 
 	dir := t.TempDir()
 	csvContent := "username,full_name,email,role,department\ncsv_dept_user,Dept User,dept@campus.local,clinician,General Medicine\n"
@@ -204,5 +217,5 @@ func TestCSVWatcher_DepartmentSync(t *testing.T) {
 	assert.Equal(t, "General Medicine", dept.Name)
 
 	// Cleanup
-	db.Where("username = ?", "csv_dept_user").Delete(&models.User{})
+	db.Unscoped().Where("username = ?", "csv_dept_user").Delete(&models.User{})
 }

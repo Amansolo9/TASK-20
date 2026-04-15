@@ -54,6 +54,8 @@ func setupIntegrationDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+// setupRouter creates a Gin router that mirrors the production route registrations
+// in cmd/server/main.go 1:1 so that every production endpoint is testable.
 func setupRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	t.Helper()
 	db := setupIntegrationDB(t)
@@ -68,12 +70,14 @@ func setupRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	auditSvc := services.NewAuditService(db)
 	healthSvc := services.NewHealthService(db, auditSvc, cfg.UploadDir)
 	bookingSvc := services.NewBookingService(db, auditSvc, nil)
+	menuSvc := services.NewMenuService(db, auditSvc)
 	reportingSvc := services.NewReportingService(db, cfg.CacheTTL)
 	webhookSvc := services.NewWebhookService(db)
 
 	authHandler := NewAuthHandler(authSvc, auditSvc, db, cfg)
 	healthHandler := NewHealthHandler(healthSvc, auditSvc)
 	bookingHandler := NewBookingHandler(bookingSvc, db)
+	menuHandler := NewMenuHandler(menuSvc)
 	adminHandler := NewAdminHandler(reportingSvc, webhookSvc)
 
 	r := gin.New()
@@ -84,51 +88,106 @@ func setupRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	)
 	r.SetHTMLTemplate(htmlTemplates)
 
-	// Public routes
+	// Public routes — mirrors main.go:99-100
 	r.GET("/login", authHandler.LoginPage)
 	r.POST("/login", authHandler.Login)
 
-	// Authenticated routes — mirrors production middleware stack
+	// ===================== Session-authenticated routes — mirrors main.go:103-184 =====================
 	authed := r.Group("/")
 	authed.Use(middleware.AuthRequired(authSvc))
 	authed.Use(middleware.DataScope())
 	authed.Use(middleware.CSRFProtect())
 	{
-		authed.GET("/dashboard", healthHandler.DashboardPage)
+		authed.GET("/", func(c *gin.Context) { c.Redirect(302, "/dashboard") })
 		authed.GET("/logout", authHandler.Logout)
 
-		// Self-upload: all roles except staff (mirrors production)
+		// Token issuance (session-auth)
+		authed.POST("/api/tokens", authHandler.IssueToken)
+
+		// Dashboard + document access (all roles)
+		authed.GET("/dashboard", healthHandler.DashboardPage)
+		authed.GET("/health/download/:id", healthHandler.DownloadAttachment)
+		authed.GET("/health/history", healthHandler.RecordHistory)
+
+		// Self-upload
 		authed.POST("/health/upload", healthHandler.UploadAttachment)
 
-		// Health record mutations: clinician/admin only (mirrors production)
+		// Health record mutations — clinician/admin only
 		healthMut := authed.Group("/health")
 		healthMut.Use(middleware.RequireRole(models.RoleClinician, models.RoleAdmin))
 		{
 			healthMut.POST("/update", healthHandler.UpdateHealthRecord)
 		}
 
+		// Clinician routes
+		clinician := authed.Group("/clinician")
+		clinician.Use(middleware.RequireRole(models.RoleClinician, models.RoleAdmin))
+		{
+			clinician.GET("", healthHandler.ClinicianPage)
+			clinician.POST("/encounter", healthHandler.CreateEncounter)
+			clinician.POST("/vitals", healthHandler.RecordVitals)
+		}
+
+		// Booking page routes
 		authed.GET("/bookings", bookingHandler.BookingPage)
 		authed.POST("/bookings", bookingHandler.CreateBooking)
+		authed.POST("/bookings/:id/transition", bookingHandler.TransitionBooking)
+		authed.GET("/bookings/:id/audit", bookingHandler.BookingAudit)
 
-		adminGroup := authed.Group("/admin")
-		adminGroup.Use(middleware.RequireRole(models.RoleAdmin))
+		// Menu page routes
+		authed.GET("/menu", menuHandler.MenuPage)
+		authed.POST("/menu/order", menuHandler.CreateOrder)
+
+		// Menu management — staff/admin only
+		menuManage := authed.Group("/menu/manage")
+		menuManage.Use(middleware.RequireRole(models.RoleStaff, models.RoleAdmin))
 		{
-			adminGroup.GET("/users", authHandler.UsersPage)
-			adminGroup.POST("/users/:id/role", authHandler.ChangeRole)
-			adminGroup.POST("/users/:id/toggle", authHandler.ToggleUser)
+			menuManage.GET("", menuHandler.MenuManagePage)
+			menuManage.POST("/category", menuHandler.CreateCategory)
+			menuManage.POST("/item", menuHandler.CreateMenuItem)
+			menuManage.POST("/item/:id/sold-out", menuHandler.ToggleSoldOut)
+			menuManage.POST("/item/:id/sell-windows", menuHandler.SetSellWindows)
+			menuManage.POST("/item/:id/substitutes", menuHandler.SetSubstitutes)
+			menuManage.POST("/item/:id/choices", menuHandler.AddChoice)
+			menuManage.POST("/blackout", menuHandler.CreateBlackout)
+			menuManage.POST("/blackout/:id/delete", menuHandler.DeleteBlackout)
+			menuManage.POST("/promotion", menuHandler.CreatePromotion)
+		}
+
+		// Admin routes
+		admin := authed.Group("/admin")
+		admin.Use(middleware.RequireRole(models.RoleAdmin))
+		{
+			admin.GET("/users", authHandler.UsersPage)
+			admin.GET("/register", authHandler.RegisterPage)
+			admin.POST("/register", authHandler.Register)
+			admin.POST("/users/:id/toggle", authHandler.ToggleUser)
+			admin.POST("/users/:id/role", authHandler.ChangeRole)
+			admin.POST("/users/:id/temp-access", authHandler.GrantTempAccess)
+			admin.POST("/users/:id/reset-password", authHandler.ResetPassword)
+			admin.GET("/performance", adminHandler.PerformancePage)
+			admin.POST("/refresh-views", adminHandler.RefreshViews)
+			admin.GET("/webhooks", adminHandler.WebhooksPage)
+			admin.POST("/webhooks", adminHandler.RegisterWebhook)
+			admin.GET("/bookings", bookingHandler.AllBookingsPage)
+			admin.POST("/reports", adminHandler.SubmitReport)
+			admin.GET("/reports/:id", adminHandler.GetReportStatus)
 		}
 	}
 
-	// API routes — token + HMAC auth
+	// ===================== REST API (token + HMAC) — mirrors main.go:186-197 =====================
 	api := r.Group("/api")
 	api.Use(middleware.APITokenRequired(authSvc))
 	api.Use(middleware.HMACAuth("test-hmac"))
 	api.Use(middleware.DataScope())
 	{
 		api.GET("/slots", bookingHandler.GetSlots)
+		api.GET("/match-partners", bookingHandler.MatchPartners)
+		api.GET("/check-conflicts", bookingHandler.CheckConflicts)
+		api.GET("/price", menuHandler.CalculatePrice)
 	}
 
-	// Internal API routes — token + HMAC + admin RBAC (mirrors production)
+	// ===================== Internal API — mirrors main.go:199-219 =====================
 	internal := r.Group("/api/internal")
 	internal.Use(middleware.APITokenRequired(authSvc))
 	internal.Use(middleware.HMACAuth("test-hmac"))
@@ -138,15 +197,29 @@ func setupRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 		internal.GET("/clinic-utilization", adminHandler.APIClinicUtilization)
 		internal.GET("/booking-fill-rates", adminHandler.APIBookingFillRates)
 		internal.GET("/menu-sell-through", adminHandler.APIMenuSellThrough)
+		internal.POST("/webhooks/receive", func(c *gin.Context) {
+			var payload map[string]interface{}
+			if err := c.BindJSON(&payload); err != nil {
+				c.JSON(400, gin.H{"error": "invalid payload"})
+				return
+			}
+			eventType, _ := payload["event_type"].(string)
+			knownEvents := make(map[string]bool)
+			for _, et := range services.AllEventTypes() {
+				knownEvents[et] = true
+			}
+			if !knownEvents[eventType] {
+				c.JSON(400, gin.H{"error": "unknown event type: " + eventType})
+				return
+			}
+			c.JSON(200, gin.H{"status": "received", "event_type": eventType})
+		})
 		internal.GET("/webhooks", func(c *gin.Context) {
 			orgID := getCallerOrgID(c)
 			endpoints, _ := webhookSvc.GetEndpoints(orgID)
 			c.JSON(200, endpoints)
 		})
 	}
-
-	// Token issuance (session-auth)
-	authed.POST("/api/tokens", authHandler.IssueToken)
 
 	return r, db
 }
@@ -958,6 +1031,9 @@ func TestInternalAPI_OrgScopedReports_MenuSellThrough(t *testing.T) {
 func TestInternalAPI_WebhookEndpoints_OrgScoped(t *testing.T) {
 	r, db := setupRouter(t)
 	org2ID, _ := createSecondOrg(t, db)
+
+	// Ensure admin2 is active (may have been affected by other tests)
+	db.Model(&models.User{}).Where("username = ?", "admin2").Update("active", true)
 
 	// Register webhook for org 1
 	db.Create(&models.WebhookEndpoint{

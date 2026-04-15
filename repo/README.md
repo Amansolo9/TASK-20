@@ -1,6 +1,8 @@
 # Campus Wellness & Training Operations Portal
 
-A university-run health clinic and athletics department operations portal designed to function entirely on an internal network. Built with Go (Gin), HTML/CSS/JS, and PostgreSQL.
+**Project type:** Fullstack web application (Go backend + server-rendered Templ UI + vanilla JS/CSS)
+
+A university-run health clinic and athletics department operations portal designed to function entirely on an internal network. Built with Go (Gin), Templ, and PostgreSQL.
 
 ---
 
@@ -55,6 +57,11 @@ The system is designed for **fully offline/internal network** deployment with no
 ## Quick Start
 
 ```bash
+docker-compose up --build
+```
+
+Or equivalently (Docker Compose v2):
+```bash
 docker compose up --build
 ```
 
@@ -72,55 +79,54 @@ No `.env` file or manual setup is required for development. `SESSION_KEY` and `H
 
 To stop:
 ```bash
-docker compose down
+docker-compose down
 ```
 
 To stop and wipe all data (fresh start):
 ```bash
-docker compose down -v
+docker-compose down -v
+```
+
+### Verify It Works
+
+After `docker-compose up --build` completes and the server logs `Campus Portal starting on :8080`:
+
+1. **Open** http://localhost:8080 — you should see the login page
+2. **Login** with username `admin` / password `password123`
+3. **Verify the dashboard** loads with "Health Dashboard" heading
+4. **Check navigation**: click "Training Sessions" → should show booking form; click "Dining" → should show menu
+5. **Test admin features**: click "Users" → should list 7 seed users; click "Performance" → should show dashboard
+
+Alternatively, verify via curl:
+```bash
+# Login page returns 200
+curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/login
+# Expected: 200
 ```
 
 ### Running Tests
 
 ```bash
-# Run all tests (requires PostgreSQL from Docker Compose to be running)
+# Self-contained: starts DB in Docker, runs all tests, stops DB
+bash run_tests.sh --docker
+
+# Or if Docker Compose DB is already running:
 bash run_tests.sh
 
-# Run only unit tests (no database required)
+# Unit tests only (no database required)
 bash run_tests.sh --unit
 
-# Run only API/integration tests (requires PostgreSQL)
+# API/integration tests only (requires PostgreSQL)
 bash run_tests.sh --api
 
 # Full suite with coverage report
 bash run_tests.sh --coverage
-
-# Self-contained: starts DB in Docker, runs all tests, stops DB
-bash run_tests.sh --docker
 ```
 
-**Test suite (157 test functions):**
+**Test suite (193 test functions):**
 - **Unit tests** — middleware security, crypto, config, PII masking (no DB)
 - **API/integration tests** — auth, handlers, booking, menu, webhook, health, audit, SSO sync, CSV watcher, integration contracts (requires DB)
-- **End-to-end tests** — full login→dashboard→booking→logout flows, cross-tenant isolation with strong negative assertions
-
-### Local Development (without Docker)
-
-1. **Install PostgreSQL 16** and create the database:
-   ```sql
-   CREATE USER campus_admin WITH PASSWORD 'campus_secret';
-   CREATE DATABASE campus_portal OWNER campus_admin;
-   ```
-
-2. **Run the server** (all config has sensible defaults):
-   ```bash
-   go run ./cmd/server
-   ```
-
-3. **Run tests:**
-   ```bash
-   go test ./... -v
-   ```
+- **End-to-end HTTP tests** — full login→dashboard→booking→logout flows, every production endpoint exercised via real Gin router, cross-tenant isolation with strong negative assertions
 
 ### Templ Integration
 

@@ -19,6 +19,8 @@ func TestSSOSync_CreateNewUsers(t *testing.T) {
 
 	// Ensure org exists
 	db.FirstOrCreate(&models.Organization{Name: "Campus University"}, "name = ?", "Campus University")
+	// Hard-delete leftovers from prior runs
+	db.Unscoped().Where("username IN ?", []string{"sso_student1", "sso_faculty1"}).Delete(&models.User{})
 
 	dir := t.TempDir()
 	ssoFile := filepath.Join(dir, "sso_users.json")
@@ -56,7 +58,7 @@ func TestSSOSync_CreateNewUsers(t *testing.T) {
 	assert.Contains(t, auditLog.Reason, "SSO sync")
 
 	// Cleanup
-	db.Where("username IN ?", []string{"sso_student1", "sso_faculty1"}).Delete(&models.User{})
+	db.Unscoped().Where("username IN ?", []string{"sso_student1", "sso_faculty1"}).Delete(&models.User{})
 }
 
 func TestSSOSync_UpdateExistingUser(t *testing.T) {
@@ -65,6 +67,7 @@ func TestSSOSync_UpdateExistingUser(t *testing.T) {
 	auditSvc := NewAuditService(db)
 
 	db.FirstOrCreate(&models.Organization{Name: "Campus University"}, "name = ?", "Campus University")
+	db.Unscoped().Where("username = ?", "sso_update_test").Delete(&models.User{})
 
 	// Pre-create a user
 	db.Create(&models.User{
@@ -100,7 +103,7 @@ func TestSSOSync_UpdateExistingUser(t *testing.T) {
 	assert.Contains(t, auditLog.Reason, "SSO sync")
 
 	// Cleanup
-	db.Where("username = ?", "sso_update_test").Delete(&models.User{})
+	db.Unscoped().Where("username = ?", "sso_update_test").Delete(&models.User{})
 }
 
 func TestSSOSync_DeactivateUser(t *testing.T) {
@@ -109,6 +112,7 @@ func TestSSOSync_DeactivateUser(t *testing.T) {
 	auditSvc := NewAuditService(db)
 
 	db.FirstOrCreate(&models.Organization{Name: "Campus University"}, "name = ?", "Campus University")
+	db.Unscoped().Where("username = ?", "sso_deactivate_test").Delete(&models.User{})
 
 	// Pre-create an active user
 	db.Create(&models.User{
@@ -136,7 +140,7 @@ func TestSSOSync_DeactivateUser(t *testing.T) {
 	assert.False(t, user.Active, "user should be deactivated by SSO sync")
 
 	// Cleanup
-	db.Where("username = ?", "sso_deactivate_test").Delete(&models.User{})
+	db.Unscoped().Where("username = ?", "sso_deactivate_test").Delete(&models.User{})
 }
 
 func TestSSOSync_InvalidRoleSkipped(t *testing.T) {
@@ -172,6 +176,7 @@ func TestSSOSync_AutoCreateDepartment(t *testing.T) {
 	auditSvc := NewAuditService(db)
 
 	db.FirstOrCreate(&models.Organization{Name: "Campus University"}, "name = ?", "Campus University")
+	db.Unscoped().Where("username = ?", "sso_newdept").Delete(&models.User{})
 
 	dir := t.TempDir()
 	ssoFile := filepath.Join(dir, "sso_users.json")
@@ -199,7 +204,7 @@ func TestSSOSync_AutoCreateDepartment(t *testing.T) {
 	assert.Equal(t, dept.ID, *user.DepartmentID)
 
 	// Cleanup
-	db.Where("username = ?", "sso_newdept").Delete(&models.User{})
+	db.Unscoped().Where("username = ?", "sso_newdept").Delete(&models.User{})
 	db.Where("name = ? AND organization_id = ?", "Radiology", 1).Delete(&models.DepartmentRecord{})
 }
 
@@ -261,6 +266,7 @@ func TestSSOSync_IdempotentRerun(t *testing.T) {
 	auditSvc := NewAuditService(db)
 
 	db.FirstOrCreate(&models.Organization{Name: "Campus University"}, "name = ?", "Campus University")
+	db.Unscoped().Where("username = ?", "sso_idempotent").Delete(&models.User{})
 
 	dir := t.TempDir()
 	ssoFile := filepath.Join(dir, "sso_users.json")
@@ -289,5 +295,5 @@ func TestSSOSync_IdempotentRerun(t *testing.T) {
 	assert.Equal(t, int64(0), auditCount, "re-run with no changes should not produce update audit log")
 
 	// Cleanup
-	db.Where("username = ?", "sso_idempotent").Delete(&models.User{})
+	db.Unscoped().Where("username = ?", "sso_idempotent").Delete(&models.User{})
 }
